@@ -1026,7 +1026,7 @@ def test_model(model_path, test_image_path=None, dataset_path=None):
     
     # Load model
     model = MemoryOptimizedVimTS().to(device)
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
