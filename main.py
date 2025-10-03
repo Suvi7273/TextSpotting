@@ -540,7 +540,7 @@ class VimTSLoss(nn.Module):
         pred_flat = pred_logits.view(-1, C)
         target_flat = target_classes.view(-1)
         
-        return F.cross_entropy(pred_flat, target_flat)
+        return F.cross_entropy(pred_flat, target_flat, reduction='mean')
     
     def _bbox_loss(self, pred_boxes, targets):
         """Simplified bbox loss"""
@@ -553,11 +553,14 @@ class VimTSLoss(nn.Module):
                 num_boxes = min(len(boxes), pred_boxes.shape[1])
                 if num_boxes > 0:
                     pred_b = pred_boxes[b, :num_boxes]
-                    target_b = boxes[:num_boxes]
+                    target_b = boxes[:num_boxes].to(pred_boxes.device)
                     total_loss += F.l1_loss(pred_b, target_b, reduction='sum')
                     num_pos += num_boxes
         
-        return total_loss / max(num_pos, 1)
+        if num_pos == 0:
+            return torch.tensor(0.0, device=pred_boxes.device, requires_grad=True)
+        
+        return total_loss / num_pos
     
     def _polygon_loss(self, pred_polygons, targets):
         """Simplified polygon loss"""
@@ -570,11 +573,14 @@ class VimTSLoss(nn.Module):
                 num_polygons = min(len(polygons), pred_polygons.shape[1])
                 if num_polygons > 0:
                     pred_b = pred_polygons[b, :num_polygons]
-                    target_b = polygons[:num_polygons]
+                    target_b = polygons[:num_polygons].to(pred_polygons.device)
                     total_loss += F.l1_loss(pred_b, target_b, reduction='sum')
                     num_pos += num_polygons
         
-        return total_loss / max(num_pos, 1)
+        if num_pos == 0:
+            return torch.tensor(0.0, device=pred_polygons.device, requires_grad=True)
+        
+        return total_loss / num_pos
     
     def _text_loss(self, pred_texts, targets):
         """Simplified text loss"""
@@ -590,11 +596,11 @@ class VimTSLoss(nn.Module):
                 num_texts = min(len(texts), 25)
                 if num_texts > 0:
                     pred_b = pred_rec_texts[b, :num_texts]  # [num_texts, max_len, vocab_size]
-                    target_b = texts[:num_texts]  # [num_texts, max_len]
+                    target_b = texts[:num_texts].to(pred_texts.device)  # [num_texts, max_len]
                     
                     # Flatten for cross-entropy
-                    pred_flat = pred_b.view(-1, pred_b.shape[-1])
-                    target_flat = target_b.view(-1)
+                    pred_flat = pred_b.reshape(-1, pred_b.shape[-1])
+                    target_flat = target_b.reshape(-1)
                     
                     # Ignore padding tokens (assume 0 is padding)
                     mask = target_flat != 0
@@ -603,7 +609,10 @@ class VimTSLoss(nn.Module):
                         total_loss += loss_b
                         num_pos += mask.sum().item()
         
-        return total_loss / max(num_pos, 1)
+        if num_pos == 0:
+            return torch.tensor(0.0, device=pred_texts.device, requires_grad=True)
+        
+        return total_loss / num_pos
 
 # ============================================================================
 # 7. DATASET LOADING
@@ -696,24 +705,24 @@ class VimTSDataset(Dataset):
             if 'segmentation' in ann and len(ann['segmentation']) > 0:
                 # Take first polygon
                 seg = ann['segmentation'][0]
-                poly = np.array(seg).reshape(-1, 2)
+                poly = np.array(seg, dtype=np.float32).reshape(-1, 2)
                 
                 # Normalize coordinates
-                poly[:, 0] /= original_w  # x coordinates
-                poly[:, 1] /= original_h  # y coordinates
+                poly[:, 0] = poly[:, 0] / original_w  # x coordinates
+                poly[:, 1] = poly[:, 1] / original_h  # y coordinates
                 
                 # Flatten and pad/crop to 16 values (8 points)
                 poly_flat = poly.flatten()
                 if len(poly_flat) >= 16:
                     poly_flat = poly_flat[:16]
                 else:
-                    poly_flat = np.pad(poly_flat, (0, 16 - len(poly_flat)))
+                    poly_flat = np.pad(poly_flat, (0, 16 - len(poly_flat)), mode='constant', constant_values=0)
                 
                 polygons.append(poly_flat)
             else:
                 # Default polygon (corners of bbox)
                 x1, y1, x2, y2 = norm_box
-                poly_flat = np.array([x1, y1, x2, y1, x2, y2, x1, y2] * 2)[:16]
+                poly_flat = np.array([x1, y1, x2, y1, x2, y2, x1, y2] * 2, dtype=np.float32)[:16]
                 polygons.append(poly_flat)
             
             # Text tokens
@@ -731,12 +740,21 @@ class VimTSDataset(Dataset):
             texts.append(tokens[:self.max_text_len])
         
         # Convert to tensors
-        target = {
-            'labels': torch.tensor(labels, dtype=torch.long),
-            'boxes': torch.tensor(boxes, dtype=torch.float),
-            'polygons': torch.tensor(polygons, dtype=torch.float),
-            'texts': torch.tensor(texts, dtype=torch.long)
-        }
+        if len(labels) == 0:
+            # If no annotations, create empty tensors
+            target = {
+                'labels': torch.zeros(0, dtype=torch.long),
+                'boxes': torch.zeros(0, 4, dtype=torch.float),
+                'polygons': torch.zeros(0, 16, dtype=torch.float),
+                'texts': torch.zeros(0, self.max_text_len, dtype=torch.long)
+            }
+        else:
+            target = {
+                'labels': torch.tensor(labels, dtype=torch.long),
+                'boxes': torch.tensor(boxes, dtype=torch.float32),
+                'polygons': torch.tensor(np.array(polygons, dtype=np.float32), dtype=torch.float32),
+                'texts': torch.tensor(texts, dtype=torch.long)
+            }
         
         return image, target
 
@@ -1083,7 +1101,7 @@ def main():
     choice = input("Enter choice (1/2/3/4): ").strip()
     
     # Default paths (modify these for your setup)
-    dataset_path = "/content/drive/MyDrive/totaltext"  # Adjust this path
+    dataset_path = "/content/drive/MyDrive/"  # Adjust this path
     save_path = "/content/drive/MyDrive/"
     
     if choice == "1":
