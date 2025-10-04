@@ -961,7 +961,7 @@ class VimTSDataset(Dataset):
         
         for ann in annotations:
             # Label (category_id)
-            labels.append(ann.get('category_id', 1))
+            # labels.append(ann.get('category_id', 1))
             
             # Bounding box - normalize to [0, 1]
             x, y, w, h = ann['bbox']
