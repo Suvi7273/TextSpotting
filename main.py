@@ -408,7 +408,7 @@ class EfficientDecoderLayer(nn.Module):
 
 class MemoryOptimizedVimTS(nn.Module):
     """Complete Memory-Optimized VimTS Model"""
-    def __init__(self, num_classes=2, vocab_size=100, max_text_len=25):
+    def __init__(self, num_classes=2, vocab_size=97, max_text_len=25):
         super().__init__()
         
         self.max_text_len = max_text_len
@@ -842,7 +842,7 @@ def collate_fn(batch):
 class VimTSDataset(Dataset):
     """VimTS Dataset with memory-efficient loading"""
     def __init__(self, dataset_path, split='train', image_size=(640, 640), 
-                 max_text_len=25, vocab_size=100):
+                 max_text_len=25, vocab_size=97):
         self.dataset_path = dataset_path
         self.split = split
         self.image_size = image_size
@@ -1078,7 +1078,7 @@ def train_vimts(dataset_path, num_epochs=10, batch_size=1, learning_rate=1e-4,
         split='train',
         image_size=(640, 640),  # Keep original resolution for accuracy
         max_text_len=25,
-        vocab_size=100
+        vocab_size=97
     )
     
     train_loader = DataLoader(
@@ -1097,7 +1097,7 @@ def train_vimts(dataset_path, num_epochs=10, batch_size=1, learning_rate=1e-4,
     print("\nInitializing model...")
     model = MemoryOptimizedVimTS(
         num_classes=1, # This defines positive classes (e.g., just 'text'). Background is num_classes+1.
-        vocab_size=96, # Adjust based on your actual character set
+        vocab_size=97, # Adjust based on your actual character set
         max_text_len=25
     ).to(device)
     
@@ -1121,7 +1121,7 @@ def train_vimts(dataset_path, num_epochs=10, batch_size=1, learning_rate=1e-4,
     criterion = VimTSLoss(
         matcher=matcher,
         num_classes=1, # Match model's positive class count
-        vocab_size=96, # Match model's vocab size
+        vocab_size=97, # Match model's vocab size
         max_text_len=25,
         weight_class=2.0,
         weight_bbox=5.0,
@@ -1279,7 +1279,8 @@ def test_model(model_path, test_image_path=None, dataset_path=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Load model
-    model = MemoryOptimizedVimTS().to(device)
+    # model = MemoryOptimizedVimTS().to(device)
+    model = MemoryOptimizedVimTS(num_classes=1, vocab_size=97).to(device)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
