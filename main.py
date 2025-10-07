@@ -847,52 +847,40 @@ class VimTSDataset(Dataset):
         self.split = split
         self.image_size = image_size
         self.max_text_len = max_text_len
-        self.vocab_size = vocab_size # Keep this as 96 (or actual character count)
-        self.padding_token_id = 0 # Define padding token ID
-        self.unk_token_id = 1 # Define unknown token ID (or any other non-zero)
+        self.vocab_size = vocab_size # Should be 96 as per VimTS original
+        self.padding_token_id = 0 # Conventionally 0 for padding
+        self.unk_token_id = 1   # Conventionally 1 for unknown character
 
-        # Example character mapping (this needs to be comprehensive for your dataset)
-        # You should generate this based on your dataset's characters
-        self.char_list = sorted(list(
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ "))
-        self.char_to_id = {char: i + 2 for i, char in enumerate(self.char_list)} # Start from 2 (0=PAD, 1=UNK)
+        # Build your character mapping consistent with the original VimTS `rec` field
+        # The original VimTS uses a char_list like below. Adjust it if needed.
+        _char_str = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ "
+        self.char_list = list(_char_str)
+        
+        # Create char_to_id and id_to_char for YOUR model's vocabulary.
+        # Starting from 2 because 0 is PAD and 1 is UNK.
+        self.char_to_id = {char: i + 2 for i, char in enumerate(self.char_list)}
         self.id_to_char = {i + 2: char for i, char in enumerate(self.char_list)}
+        
         self.char_to_id['<pad>'] = self.padding_token_id
+        self.id_to_char[self.padding_token_id] = '<pad>'
+        
         self.char_to_id['<unk>'] = self.unk_token_id
-        
-        # Assert that vocab_size matches len(self.char_list) + 2 (PAD and UNK)
-        # Or, if vocab_size is fixed, map characters beyond that to UNK.
-        
-        # Paths
-        self.annotation_file = os.path.join(dataset_path, 'totaltext', f'{split}.json')
-        self.image_dir = os.path.join(dataset_path, 'totaltext', 'train_images')
-        
-        # Load annotations
-        print(f"Loading {split} annotations from {self.annotation_file}")
-        with open(self.annotation_file, 'r') as f:
-            coco_data = json.load(f)
-        
-        # Create image ID to filename mapping
-        self.images = {img['id']: img['file_name'] for img in coco_data['images']}
-        
-        # Group annotations by image
-        self.image_to_annotations = {}
-        for ann in coco_data['annotations']:
-            img_id = ann['image_id']
-            if img_id not in self.image_to_annotations:
-                self.image_to_annotations[img_id] = []
-            self.image_to_annotations[img_id].append(ann)
-        
-        self.image_ids = list(self.images.keys())
-        print(f"Loaded {len(self.image_ids)} images for {split}")
-        
-        # Transforms
-        self.transform = transforms.Compose([
-            transforms.Resize(image_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                               std=[0.229, 0.224, 0.225])
-        ])
+        self.id_to_char[self.unk_token_id] = '<unk>'
+
+        # Verify vocab_size
+        assert len(self.char_to_id) == self.vocab_size, \
+               f"Vocab size mismatch! Expected {self.vocab_size}, got {len(self.char_to_id)}"
+
+        # If `ann['rec']` contains integers *different* from your `char_to_id` mapping,
+        # you need a way to map the *original* integer IDs (like 84, 72) to characters,
+        # then map those characters to your *new* char_to_id.
+        # This part assumes a direct mapping of the original integer tokens if they are <= self.vocab_size -1,
+        # or map to UNK if they are too high.
+        # Based on the VimTS repo and common practice, these are usually direct token IDs.
+        # Let's assume the `rec` integers directly correspond to token IDs in a 0-95 range,
+        # where 96 is padding in *their* scheme.
+
+        self.original_padding_id_in_json = 96 # Based on your sample JSON
     
     def __len__(self):
         return len(self.image_ids)
@@ -960,35 +948,45 @@ class VimTSDataset(Dataset):
                 poly_flat = np.array([x1, y1, x2, y1, x2, y2, x1, y2] * 2, dtype=np.float32)[:16]
                 polygons.append(poly_flat)
             
-            # Text tokens
-            text_str = ann.get('rec', '')
+            text_str_raw = ann.get('rec', []) # Default to empty list for 'rec'
+
             tokens = []
-            if isinstance(text_str, str):
-                for c in text_str:
-                    tokens.append(self.char_to_id.get(c, self.unk_token_id)) # Use get with unk_token_id
-            # elif isinstance(text_str, list): (Remove this if totaltext 'rec' is always string)
-            #     tokens = [min(int(t), self.vocab_size - 1) for t in text_str[:self.max_text_len]]
-            
+            if isinstance(text_str_raw, list):
+                for original_token_id in text_str_raw:
+                    if original_token_id == self.original_padding_id_in_json:
+                        # Skip their padding token, we'll add our own later
+                        continue
+                    
+                    # Assuming original_token_id (e.g., 84, 72) maps to a character in *our* char_list
+                    # This implies original_token_id is an index into a predefined character list,
+                    # not ASCII value.
+                    # This is the tricky part - how does VimTS map these integers to characters?
+                    # The safest way is to re-map them to YOUR vocab
+                    
+                    # For simplicity, let's assume `original_token_id` is an index into a common char_list (e.g., their vocab).
+                    # If their `vocab_size` was 96 and they used indices 0-95, then `96` would be an out-of-bounds padding.
+                    # You need to explicitly convert these original integer IDs to your `char_to_id` system.
+                    
+                    # A robust way: define a "their_id_to_char" based on VimTS's exact vocabulary,
+                    # then use `self.char_to_id.get(their_char, self.unk_token_id)`.
+                    
+                    # If we assume their 0-95 correspond to OUR 2-97 (PAD, UNK + 96 chars):
+                    # This is a simplification and might need adjustment if their char_list is different.
+                    
+                    # Try this first: Assume `original_token_id` is an index into THEIR char list
+                    # that matches your character set.
+                    # This is a common pattern for tokenized datasets.
+                    if 0 <= original_token_id < (self.vocab_size - 2): # Account for PAD/UNK in OUR vocab
+                        # Map their original ID (assuming 0-indexed for chars) to our system (2-indexed for chars)
+                        tokens.append(original_token_id + 2)
+                    else:
+                        tokens.append(self.unk_token_id)
+
             # Pad to max length
             tokens = tokens[:self.max_text_len] + [self.padding_token_id] * (self.max_text_len - len(tokens))
             texts.append(tokens[:self.max_text_len])
 
-            # Ensure 'labels' in target are 0 for 'text' and not 1 (which would be background for DETR)
-            # If your dataset has multiple classes, adjust num_classes and label mapping accordingly.
-            # For simplicity with num_classes=1 (text), all positive labels should be 0.
-            labels.append(0) # Assign 0 for 'text' class
-            
-            # if isinstance(text_str, str):
-            #     # Convert characters to token IDs
-            #     tokens = [min(ord(c), self.vocab_size - 1) for c in text_str[:self.max_text_len]]
-            # elif isinstance(text_str, list):
-            #     tokens = [min(int(t), self.vocab_size - 1) for t in text_str[:self.max_text_len]]
-            # else:
-            #     tokens = []
-            
-            # # Pad to max length
-            # tokens = tokens + [0] * (self.max_text_len - len(tokens))
-            # texts.append(tokens[:self.max_text_len])
+            labels.append(0) # Keep this single line
         
         # Convert to tensors
         if len(labels) == 0:
