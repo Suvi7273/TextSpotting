@@ -25,7 +25,7 @@ from collections import OrderedDict
 from torchvision.models._utils import IntermediateLayerGetter
 
 # Assume Module 1 components are available
-# from vimts_module1 import NestedTensor, FrozenBatchNorm2d, build_position_encoding
+from util import NestedTensor, FrozenBatchNorm2d, build_position_encoding, nested_tensor_from_tensor_list
 
 print(f"VimTS Module 2 - Backbone and Adapters")
 
