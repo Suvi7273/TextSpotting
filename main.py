@@ -1,597 +1,578 @@
-
 """
-VimTS Local Dataset Testing - Your Own Dataset + train.json
-==========================================================
-
-Modified integration test that uses your local dataset with train.json annotations.
-Perfect for testing with real text detection datasets!
-
-Usage in Google Colab:
-    # Upload your images folder and train.json to Colab
-    from vimts_module1 import *
-    from vimts_module2 import *
-    exec(open('vimts_local_dataset_test.py').read())
-
-    # Test with your dataset
-    run_vimts_local_dataset_test(
-        images_dir='your_images_folder', 
-        json_file='train.json',
-        max_images=5
-    )
+VimTS Module 1 Data Flow Demonstration
+This script shows how data transforms through the backbone (Module 1)
+Usage: python main.py
 """
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from PIL import Image, ImageDraw, ImageFont
-import torchvision.transforms as transforms
 import json
 import os
-import time
+from PIL import Image
+import numpy as np
 from pathlib import Path
+import torchvision.transforms as T
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 
-from rem_and_adapter import *
+# Import our modules
+from util import (
+    NestedTensor, 
+    nested_tensor_from_tensor_list,
+    build_position_encoding,
+    test_module1_components
+)
+from rem_and_adapter import (
+    build_backbone,
+    test_module2_components
+)
+
 # ============================================================================
-# Local Dataset Loading Functions
+# 1. Data Loading and Preprocessing
 # ============================================================================
 
-def load_dataset_json(json_file):
-    """
-    Load and parse your train.json file
-    Supports various annotation formats (COCO-style, custom formats)
-    """
-    try:
-        with open(json_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-        print(f"✓ Loaded JSON file: {json_file}")
-
-        # Analyze JSON structure
-        if isinstance(data, dict):
-            if 'images' in data and 'annotations' in data:
-                # COCO-style format
-                print(f"  Format: COCO-style")
-                print(f"  Images: {len(data['images'])}")
-                print(f"  Annotations: {len(data['annotations'])}")
-                return data, 'coco'
-            elif 'annotations' in data:
-                # Simple annotations dict
-                print(f"  Format: Simple annotations dict")
-                print(f"  Images: {len(data['annotations'])}")
-                return data, 'simple'
-            else:
-                # Unknown dict format
-                print(f"  Format: Custom dict (keys: {list(data.keys())})")
-                return data, 'custom'
-        elif isinstance(data, list):
-            # List of annotations
-            print(f"  Format: Annotation list")
-            print(f"  Entries: {len(data)}")
-            return data, 'list'
-        else:
-            print(f"  Format: Unknown")
-            return data, 'unknown'
-
-    except Exception as e:
-        print(f"✗ Failed to load JSON file: {e}")
-        return None, None
-
-def parse_annotations(data, format_type):
-    """
-    Parse annotations into a common format
-    Returns list of {image_path, annotations} dicts
-    """
-    parsed_data = []
-
-    try:
-        if format_type == 'coco':
-            # COCO-style: separate images and annotations
-            images = {img['id']: img for img in data['images']}
-
-            # Group annotations by image
-            image_annotations = {}
-            for ann in data['annotations']:
-                img_id = ann['image_id']
-                if img_id not in image_annotations:
-                    image_annotations[img_id] = []
-                image_annotations[img_id].append(ann)
-
-            # Combine images with their annotations
-            for img_id, img_info in images.items():
-                parsed_data.append({
-                    'image_path': img_info.get('file_name', f"image_{img_id}.jpg"),
-                    'image_id': img_id,
-                    'width': img_info.get('width', 0),
-                    'height': img_info.get('height', 0),
-                    'annotations': image_annotations.get(img_id, [])
-                })
-
-        elif format_type == 'simple':
-            # Simple dict with image names as keys  
-            annotations = data.get('annotations', data)
-            for img_name, img_anns in annotations.items():
-                parsed_data.append({
-                    'image_path': img_name,
-                    'image_id': img_name,
-                    'annotations': img_anns if isinstance(img_anns, list) else [img_anns]
-                })
-
-        elif format_type == 'list':
-            # List of annotation entries
-            for i, entry in enumerate(data):
-                if isinstance(entry, dict):
-                    image_path = entry.get('image_path', entry.get('filename', entry.get('image', f'image_{i}.jpg')))
-                    parsed_data.append({
-                        'image_path': image_path,
-                        'image_id': i,
-                        'annotations': entry.get('annotations', [entry])  # Entry itself might be annotation
-                    })
-
-        elif format_type == 'custom':
-            # Try to handle custom format
-            print("Attempting to parse custom format...")
-            if 'images' in data:
-                for img_data in data['images']:
-                    parsed_data.append({
-                        'image_path': img_data.get('path', img_data.get('filename', 'unknown.jpg')),
-                        'image_id': img_data.get('id', len(parsed_data)),
-                        'annotations': img_data.get('annotations', [])
-                    })
-            else:
-                # Fallback: treat as simple key-value
-                for key, value in data.items():
-                    if isinstance(value, (dict, list)):
-                        parsed_data.append({
-                            'image_path': key,
-                            'image_id': key,
-                            'annotations': value if isinstance(value, list) else [value]
-                        })
-
-    except Exception as e:
-        print(f"Warning: Error parsing annotations: {e}")
-
-    print(f"✓ Parsed {len(parsed_data)} image entries")
-    return parsed_data
-
-def load_local_image(image_path, images_dir, max_size=1024):
-    """
-    Load image from local directory with proper error handling
-    """
-    # Try different path combinations
-    possible_paths = [
-        image_path,  # Direct path
-        os.path.join(images_dir, image_path),  # In images directory
-        os.path.join(images_dir, os.path.basename(image_path)),  # Just filename in images dir
-    ]
-
-    for full_path in possible_paths:
-        if os.path.exists(full_path):
-            try:
-                image = Image.open(full_path).convert('RGB')
-
-                # Resize if too large (T4 memory optimization)
-                w, h = image.size
-                if max(w, h) > max_size:
-                    if w > h:
-                        new_w, new_h = max_size, int(h * max_size / w)
-                    else:
-                        new_w, new_h = int(w * max_size / h), max_size
-                    image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                    print(f"    Resized from {w}×{h} to {new_w}×{new_h}")
-
-                return image, full_path
-
-            except Exception as e:
-                print(f"    Error loading {full_path}: {e}")
-                continue
-
-    print(f"    ✗ Could not load image from any path: {possible_paths}")
-    return None, None
-
-def visualize_annotations(image, annotations, title="Image with Annotations"):
-    """
-    Visualize image with its annotations overlaid
-    """
-    fig, ax = plt.subplots(1, 1, figsize=(12, 8))
-    ax.imshow(image)
-    ax.set_title(title)
-    ax.axis('off')
-
-    colors = ['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'cyan', 'magenta']
-
-    for i, ann in enumerate(annotations):
-        color = colors[i % len(colors)]
-
-        # Handle different annotation formats
-        if 'bbox' in ann:
-            # COCO-style bbox [x, y, width, height]
-            bbox = ann['bbox']
-            if len(bbox) == 4:
-                x, y, w, h = bbox
-                rect = patches.Rectangle((x, y), w, h, linewidth=2, 
-                                       edgecolor=color, facecolor='none')
-                ax.add_patch(rect)
-
-        elif 'points' in ann:
-            # Polygon points
-            points = ann['points']
-            if len(points) >= 6:  # At least 3 points (x,y pairs)
-                # Reshape to (n, 2) if needed
-                if len(points) % 2 == 0:
-                    points = np.array(points).reshape(-1, 2)
-                    polygon = patches.Polygon(points, linewidth=2,
-                                           edgecolor=color, facecolor='none')
-                    ax.add_patch(polygon)
-
-        elif 'polygon' in ann:
-            # Direct polygon format
-            polygon_points = ann['polygon']
-            if len(polygon_points) >= 6:
-                points = np.array(polygon_points).reshape(-1, 2)
-                polygon = patches.Polygon(points, linewidth=2,
-                                       edgecolor=color, facecolor='none')
-                ax.add_patch(polygon)
-
-        # Add text label if available
-        text = ann.get('text', ann.get('transcription', f'Text_{i}'))
-        if 'bbox' in ann:
-            ax.text(ann['bbox'][0], ann['bbox'][1]-5, text, 
-                   color=color, fontsize=8, weight='bold',
-                   bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8))
-
-    plt.tight_layout()
-    plt.savefig(f'annotated_image_{hash(title)}.png', dpi=150, bbox_inches='tight')
-    plt.show()
-
-def preprocess_image_for_vimts(image, normalize=True):
-    """
-    Preprocess PIL image for VimTS pipeline (same as before)
-    """
-    transform_list = [transforms.ToTensor()]
-
-    if normalize:
-        # ImageNet normalization for pretrained ResNet
-        transform_list.append(
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406], 
-                std=[0.229, 0.224, 0.225]
-            )
-        )
-
-    transform = transforms.Compose(transform_list)
-    tensor = transform(image)
-    return tensor
-
-def create_local_dataset_batch(images_dir, json_file, max_images=5, visualize=True):
-    """
-    Create batch of images from your local dataset
-    """
-    print(f"Loading local dataset...")
-    print(f"Images directory: {images_dir}")
-    print(f"Annotations file: {json_file}")
-
-    # Load and parse JSON
-    data, format_type = load_dataset_json(json_file)
-    if data is None:
-        return [], []
-
-    # Parse annotations
-    parsed_data = parse_annotations(data, format_type)
-    if not parsed_data:
-        print("✗ No valid annotations found")
-        return [], []
-
-    # Load images
-    image_tensors = []
-    image_info = []
-    loaded_count = 0
-
-    print(f"\nLoading up to {max_images} images...")
-
-    for entry in parsed_data[:max_images]:
-        image_path = entry['image_path']
-        annotations = entry['annotations']
-
-        print(f"\nProcessing: {image_path}")
-        print(f"  Annotations: {len(annotations)}")
-
+class SimpleTextSpottingDataset:
+    """Simple dataset loader for text spotting demonstration"""
+    
+    def __init__(self, json_path, img_dir, transform=None):
+        self.img_dir = Path(img_dir)
+        self.transform = transform
+        
+        # Load annotations
+        with open(json_path, 'r') as f:
+            self.data = json.load(f)
+        
+        print(f"Loaded {len(self.data)} samples from {json_path}")
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        sample = self.data[idx]
+        
         # Load image
-        pil_image, full_path = load_local_image(image_path, images_dir)
-        if pil_image is None:
-            continue
+        img_path = self.img_dir / sample['image']
+        image = Image.open(img_path).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        return {
+            'image': image,
+            'image_id': sample.get('image_id', idx),
+            'filename': sample['image'],
+            'original_size': image.shape[-2:] if isinstance(image, torch.Tensor) else image.size[::-1]
+        }
 
-        print(f"  ✓ Loaded: {pil_image.size}")
+def get_transform(train=False):
+    """Get image transform pipeline"""
+    transforms = []
+    transforms.append(T.ToTensor())
+    transforms.append(T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]))
+    return T.Compose(transforms)
 
-        # Visualize with annotations
-        if visualize and annotations:
+# ============================================================================
+# 2. Visualization and Analysis Functions
+# ============================================================================
+
+def print_tensor_stats(name, tensor):
+    """Print statistics about a tensor"""
+    if isinstance(tensor, torch.Tensor):
+        print(f"\n  {name}:")
+        print(f"    Shape: {tensor.shape}")
+        print(f"    Dtype: {tensor.dtype}")
+        print(f"    Device: {tensor.device}")
+        print(f"    Range: [{tensor.min().item():.4f}, {tensor.max().item():.4f}]")
+        print(f"    Mean: {tensor.mean().item():.4f}, Std: {tensor.std().item():.4f}")
+    else:
+        print(f"\n  {name}: {type(tensor)}")
+
+def visualize_nested_tensor(nested_tensor, level_name=""):
+    """Visualize a NestedTensor structure"""
+    print(f"\n{'='*60}")
+    print(f"NestedTensor Analysis - {level_name}")
+    print(f"{'='*60}")
+    
+    tensors, mask = nested_tensor.decompose()
+    
+    print(f"\nTensor Component:")
+    print(f"  Shape: {tensors.shape}")
+    print(f"  Channels: {tensors.shape[1]}")
+    print(f"  Spatial dims: {tensors.shape[2]} x {tensors.shape[3]}")
+    
+    print(f"\nMask Component:")
+    print(f"  Shape: {mask.shape}")
+    print(f"  True (padded) pixels: {mask.sum().item()}")
+    print(f"  False (valid) pixels: {(~mask).sum().item()}")
+    
+    # Analyze per image in batch
+    batch_size = tensors.shape[0]
+    print(f"\nPer-Image Analysis (Batch size: {batch_size}):")
+    for i in range(batch_size):
+        valid_pixels = (~mask[i]).sum().item()
+        total_pixels = mask[i].numel()
+        print(f"  Image {i}: {valid_pixels}/{total_pixels} valid pixels ({100*valid_pixels/total_pixels:.1f}%)")
+
+def analyze_backbone_features(features_dict, pos_encodings):
+    """Analyze multi-scale features from backbone"""
+    print(f"\n{'='*60}")
+    print("Multi-Scale Feature Analysis")
+    print(f"{'='*60}")
+    
+    print(f"\nNumber of feature levels: {len(features_dict)}")
+    
+    for level_idx, (level_key, nested_feat) in enumerate(features_dict.items()):
+        print(f"\n--- Level {level_idx} (Key: {level_key}) ---")
+        
+        # Feature tensor
+        feat_tensor, feat_mask = nested_feat.decompose()
+        print(f"Features:")
+        print(f"  Shape: {feat_tensor.shape}")
+        print(f"  Channels: {feat_tensor.shape[1]}")
+        print(f"  Spatial: {feat_tensor.shape[2]}x{feat_tensor.shape[3]}")
+        print(f"  Memory: {feat_tensor.element_size() * feat_tensor.nelement() / 1024**2:.2f} MB")
+        
+        # Position encoding
+        pos = pos_encodings[level_idx]
+        print(f"\nPosition Encoding:")
+        print(f"  Shape: {pos.shape}")
+        print(f"  Channels: {pos.shape[1]}")
+        
+        # Receptive field info (approximate)
+        stride = 2 ** (level_idx + 2)  # Assuming standard ResNet strides
+        print(f"\nReceptive Field Info:")
+        print(f"  Approx. stride: {stride}x")
+        print(f"  Each feature covers ~{stride}x{stride} pixels in original image")
+
+def visualize_feature_maps(features_dict, pos_encodings, samples, output_dir='visualizations'):
+    """
+    Visualize feature maps as heatmaps
+    Shows original image, feature channels, and position encodings
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    print(f"\n{'='*60}")
+    print("Visualizing Feature Maps as Heatmaps")
+    print(f"{'='*60}")
+    
+    for level_idx, (level_key, nested_feat) in enumerate(features_dict.items()):
+        feat_tensor, feat_mask = nested_feat.decompose()
+        pos = pos_encodings[level_idx]
+        
+        batch_size = feat_tensor.shape[0]
+        num_channels = feat_tensor.shape[1]
+        
+        print(f"\nLevel {level_idx}: Visualizing {num_channels} channels...")
+        
+        # Visualize for each image in batch
+        for b in range(batch_size):
+            print(f"  Creating visualization for image {b}...")
+            
+            # Create figure with multiple subplots
+            fig = plt.figure(figsize=(20, 12))
+            gs = gridspec.GridSpec(4, 5, hspace=0.3, wspace=0.3)
+            
+            # Title
+            fig.suptitle(f'Feature Maps - Level {level_idx} - Image {b}\n'
+                        f'Shape: {feat_tensor.shape[1]}x{feat_tensor.shape[2]}x{feat_tensor.shape[3]}',
+                        fontsize=16, fontweight='bold')
+            
+            # Show original image
+            ax_orig = fig.add_subplot(gs[0, :2])
             try:
-                visualize_annotations(pil_image, annotations, 
-                                    f"{os.path.basename(image_path)} ({len(annotations)} annotations)")
-            except Exception as e:
-                print(f"    Warning: Visualization failed: {e}")
+                # Load and display original image
+                img_path = Path(samples[b]['filename'])
+                if not img_path.is_absolute():
+                    img_path = Path('images') / img_path
+                orig_img = Image.open(img_path).convert('RGB')
+                ax_orig.imshow(orig_img)
+                ax_orig.set_title(f'Original Image\n{samples[b]["filename"]}', fontweight='bold')
+                ax_orig.axis('off')
+            except:
+                ax_orig.text(0.5, 0.5, 'Original image\nnot available', 
+                           ha='center', va='center')
+                ax_orig.axis('off')
+            
+            # Show mask
+            ax_mask = fig.add_subplot(gs[0, 2])
+            mask_vis = feat_mask[b].cpu().numpy()
+            ax_mask.imshow(mask_vis, cmap='RdYlGn_r')
+            ax_mask.set_title(f'Mask\n{(~feat_mask[b]).sum().item()} valid pixels', fontweight='bold')
+            ax_mask.axis('off')
+            
+            # Show average feature activation across all channels
+            ax_avg = fig.add_subplot(gs[0, 3])
+            avg_feat = feat_tensor[b].mean(dim=0).cpu().numpy()
+            im_avg = ax_avg.imshow(avg_feat, cmap='viridis')
+            ax_avg.set_title('Average Feature\nActivation', fontweight='bold')
+            ax_avg.axis('off')
+            plt.colorbar(im_avg, ax=ax_avg, fraction=0.046)
+            
+            # Show position encoding (first 2 channels combined)
+            ax_pos = fig.add_subplot(gs[0, 4])
+            pos_vis = (pos[b, 0] + pos[b, 1]).cpu().numpy()
+            im_pos = ax_pos.imshow(pos_vis, cmap='twilight')
+            ax_pos.set_title('Position Encoding\n(combined)', fontweight='bold')
+            ax_pos.axis('off')
+            plt.colorbar(im_pos, ax=ax_pos, fraction=0.046)
+            
+            # Show first 15 feature channels
+            channels_to_show = min(15, num_channels)
+            for i in range(channels_to_show):
+                row = 1 + i // 5
+                col = i % 5
+                ax = fig.add_subplot(gs[row, col])
+                
+                # Get feature map for this channel
+                feat_map = feat_tensor[b, i].cpu().numpy()
+                
+                # Apply mask to show only valid regions
+                masked_feat = feat_map.copy()
+                masked_feat[mask_vis] = np.nan
+                
+                # Plot
+                im = ax.imshow(masked_feat, cmap='viridis', interpolation='nearest')
+                ax.set_title(f'Ch {i}\n'
+                           f'μ={feat_map.mean():.2f}, σ={feat_map.std():.2f}',
+                           fontsize=9)
+                ax.axis('off')
+                
+                # Add tiny colorbar
+                plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            
+            # Add statistics text
+            stats_text = f"""
+Level {level_idx} Statistics:
+• Total channels: {num_channels}
+• Spatial size: {feat_tensor.shape[2]}x{feat_tensor.shape[3]}
+• Receptive field: ~{2**(level_idx+2)}x stride
+• Active channels (>0.1): {(feat_tensor[b].mean(dim=[1,2]) > 0.1).sum().item()}
+• Min activation: {feat_tensor[b].min():.3f}
+• Max activation: {feat_tensor[b].max():.3f}
+• Mean activation: {feat_tensor[b].mean():.3f}
+            """
+            
+            fig.text(0.02, 0.02, stats_text, fontsize=10, 
+                    verticalalignment='bottom', family='monospace',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            # Save figure
+            output_path = os.path.join(output_dir, 
+                                      f'features_level{level_idx}_img{b}.png')
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            print(f"    ✓ Saved: {output_path}")
+            plt.close()
+    
+    print(f"\n✓ All visualizations saved to '{output_dir}/' directory")
+    print(f"  Check the PNG files to see feature map heatmaps!")
 
-        # Preprocess for VimTS
-        tensor = preprocess_image_for_vimts(pil_image, normalize=True)
-        image_tensors.append(tensor)
-
-        # Store info
-        image_info.append({
-            'path': full_path,
-            'original_size': pil_image.size,
-            'tensor_shape': tensor.shape,
-            'annotations': annotations,
-            'num_annotations': len(annotations)
-        })
-
-        loaded_count += 1
-        print(f"  ✓ Preprocessed: {tensor.shape}")
-        print(f"    Value range: [{tensor.min():.3f}, {tensor.max():.3f}]")
-
-    print(f"\n✓ Successfully loaded {loaded_count} images from your dataset")
-    return image_tensors, image_info
+def visualize_tensor_samples(features_dict, output_dir='visualizations'):
+    """Print small samples of actual tensor values"""
+    print(f"\n{'='*60}")
+    print("Tensor Value Samples (First 5x5 of First Channel)")
+    print(f"{'='*60}")
+    
+    for level_idx, (level_key, nested_feat) in enumerate(features_dict.items()):
+        feat_tensor, _ = nested_feat.decompose()
+        
+        print(f"\nLevel {level_idx}:")
+        print(f"Full shape: {feat_tensor.shape}")
+        print(f"\nFirst image, first channel, top-left 5x5 corner:")
+        print("-" * 50)
+        
+        # Get 5x5 sample
+        sample = feat_tensor[0, 0, :5, :5].cpu().numpy()
+        
+        # Print nicely formatted
+        for i in range(sample.shape[0]):
+            row_str = "  ".join([f"{val:7.3f}" for val in sample[i]])
+            print(f"  [{row_str}]")
+        
+        print(f"\nThese are the actual numbers the model uses!")
+        print(f"Each number represents learned feature activations")
 
 # ============================================================================
-# Modified Integration Test for Local Dataset
+# 3. Main Demo Function
 # ============================================================================
 
-def run_vimts_local_dataset_test(images_dir, json_file, max_images=5, visualize_annotations=True):
+def demo_module1_data_flow(json_path='train.json', img_dir='images', num_samples=2):
     """
-    Run VimTS integration test with your local dataset
+    Demonstrate data flow through Module 1
+    
+    Args:
+        json_path: Path to train.json annotation file
+        img_dir: Directory containing images
+        num_samples: Number of samples to process
     """
-    print("\n" + "="*80)
-    print("VimTS LOCAL DATASET TEST - YOUR DATASET + train.json")
-    print("="*80)
-
-    # Verify files exist
-    if not os.path.exists(images_dir):
-        print(f"✗ Images directory not found: {images_dir}")
+    
+    print("\n" + "="*70)
+    print("VimTS MODULE 1 DATA FLOW DEMONSTRATION")
+    print("="*70)
+    
+    # Check files exist
+    if not os.path.exists(json_path):
+        print(f"\nError: {json_path} not found!")
+        print("Please create a train.json file with format:")
+        print('[{"image": "img1.jpg", "image_id": 1}, ...]')
         return
-
-    if not os.path.exists(json_file):
-        print(f"✗ JSON file not found: {json_file}")
+    
+    if not os.path.exists(img_dir):
+        print(f"\nError: {img_dir} directory not found!")
         return
-
-    print(f"Dataset directory: {images_dir}")
-    print(f"Annotations file: {json_file}")
-
-    # Set device  
+    
+    # ========================================
+    # STEP 1: Initialize Components
+    # ========================================
+    print("\n" + "-"*70)
+    print("STEP 1: Initializing VimTS Components")
+    print("-"*70)
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    
+    # Build backbone
+    print("\nBuilding backbone...")
+    backbone = build_backbone()
+    backbone = backbone.to(device)
+    backbone.eval()  # Set to eval mode
+    print("✓ Backbone initialized")
+    
+    # Load dataset
+    print("\nLoading dataset...")
+    transform = get_transform(train=False)
+    dataset = SimpleTextSpottingDataset(json_path, img_dir, transform)
+    print(f"✓ Dataset loaded: {len(dataset)} samples")
+    
+    # ========================================
+    # STEP 2: Load and Preprocess Images
+    # ========================================
+    print("\n" + "-"*70)
+    print("STEP 2: Loading and Preprocessing Images")
+    print("-"*70)
+    
+    samples = []
+    image_tensors = []
+    
+    for i in range(min(num_samples, len(dataset))):
+        sample = dataset[i]
+        samples.append(sample)
+        image_tensors.append(sample['image'])
+        
+        print(f"\nSample {i}:")
+        print(f"  Filename: {sample['filename']}")
+        print(f"  Image shape: {sample['image'].shape}")
+        print(f"  Original size: {sample['original_size']}")
+    
+    # ========================================
+    # STEP 3: Create NestedTensor (Batching)
+    # ========================================
+    print("\n" + "-"*70)
+    print("STEP 3: Creating NestedTensor (Batch with Padding)")
+    print("-"*70)
+    
+    print("\nImages have different sizes, creating padded batch...")
+    nested_input = nested_tensor_from_tensor_list(image_tensors)
+    nested_input = nested_input.to(device)
+    
+    visualize_nested_tensor(nested_input, "Input Batch")
+    
+    # ========================================
+    # STEP 4: Backbone Forward Pass
+    # ========================================
+    print("\n" + "-"*70)
+    print("STEP 4: Backbone Forward Pass (Feature Extraction)")
+    print("-"*70)
+    
+    print("\nExtracting multi-scale features...")
+    with torch.no_grad():
+        features_list, pos_encodings = backbone(nested_input)
+    
+    print(f"✓ Extracted {len(features_list)} feature levels")
+    
+    # Convert list to dict for easier access
+    features_dict = {str(i): feat for i, feat in enumerate(features_list)}
+    
+    # ========================================
+    # STEP 5: Analyze Features
+    # ========================================
+    print("\n" + "-"*70)
+    print("STEP 5: Analyzing Extracted Features")
+    print("-"*70)
+    
+    analyze_backbone_features(features_dict, pos_encodings)
+    
+    # ========================================
+    # STEP 6: Detailed Feature Inspection
+    # ========================================
+    print("\n" + "-"*70)
+    print("STEP 6: Detailed Feature Inspection")
+    print("-"*70)
+    
+    # Inspect highest resolution features (usually level 0)
+    print("\nInspecting highest resolution features (Level 0):")
+    feat0 = features_list[0]
+    pos0 = pos_encodings[0]
+    
+    feat_tensor, feat_mask = feat0.decompose()
+    
+    print(f"\nFeature Tensor Statistics:")
+    print_tensor_stats("Features", feat_tensor)
+    print_tensor_stats("Position Encoding", pos0)
+    
+    # Show feature activation patterns
+    print(f"\nFeature Activation Analysis:")
+    batch_size = feat_tensor.shape[0]
+    for b in range(batch_size):
+        feat_img = feat_tensor[b]  # C x H x W
+        channel_means = feat_img.mean(dim=[1, 2])  # Average over spatial dims
+        
+        print(f"\n  Image {b}:")
+        print(f"    Active channels (>0.1): {(channel_means > 0.1).sum().item()}/{len(channel_means)}")
+        print(f"    Top 5 channel activations: {channel_means.topk(5).values.cpu().numpy()}")
+    
+    # ========================================
+    # STEP 6.5: Visualize Feature Maps
+    # ========================================
+    print("\n" + "-"*70)
+    print("STEP 6.5: Creating Feature Map Visualizations")
+    print("-"*70)
+    
+    visualize_feature_maps(features_dict, pos_encodings, samples)
+    visualize_tensor_samples(features_dict)
+    
+    # ========================================
+    # STEP 7: Memory Analysis
+    # ========================================
+    print("\n" + "-"*70)
+    print("STEP 7: Memory Analysis")
+    print("-"*70)
+    
+    total_memory = 0
+    print("\nMemory usage per component:")
+    
+    # Input
+    input_mem = nested_input.tensors.element_size() * nested_input.tensors.nelement() / 1024**2
+    print(f"  Input batch: {input_mem:.2f} MB")
+    total_memory += input_mem
+    
+    # Features
+    for i, feat in enumerate(features_list):
+        feat_tensor, _ = feat.decompose()
+        feat_mem = feat_tensor.element_size() * feat_tensor.nelement() / 1024**2
+        print(f"  Feature level {i}: {feat_mem:.2f} MB")
+        total_memory += feat_mem
+    
+    # Position encodings
+    for i, pos in enumerate(pos_encodings):
+        pos_mem = pos.element_size() * pos.nelement() / 1024**2
+        print(f"  Position encoding {i}: {pos_mem:.2f} MB")
+        total_memory += pos_mem
+    
+    print(f"\nTotal feature memory: {total_memory:.2f} MB")
+    
     if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"\nGPU Memory:")
+        print(f"  Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB")
+        print(f"  Cached: {torch.cuda.memory_reserved()/1024**2:.1f} MB")
+    
+    # ========================================
+    # Summary
+    # ========================================
+    print("\n" + "="*70)
+    print("MODULE 1 DATA FLOW SUMMARY")
+    print("="*70)
+    
+    print(f"""
+Input:
+  - Batch size: {nested_input.tensors.shape[0]}
+  - Image size: {nested_input.tensors.shape[2]}x{nested_input.tensors.shape[3]} (padded)
+  - Channels: {nested_input.tensors.shape[1]}
 
-    # ========================================================================
-    # Step 1: Load Your Local Dataset
-    # ========================================================================
-    print("\n" + "-"*60)
-    print("STEP 1: Loading Your Local Dataset")
-    print("-"*60)
+Output (Multi-scale Features):
+  - Number of levels: {len(features_list)}
+  - Channel counts: {[f.tensors.shape[1] for f in features_list]}
+  - Spatial dimensions: {[f'{f.tensors.shape[2]}x{f.tensors.shape[3]}' for f in features_list]}
 
-    image_list, image_info = create_local_dataset_batch(
-        images_dir, json_file, max_images, visualize_annotations
-    )
+Key Transformations:
+  1. Images → Padded Batch (NestedTensor)
+  2. Batch → ResNet Backbone → Multi-scale Features
+  3. Features → Position Encodings added
+  4. Ready for next module (Transformer Encoder)
 
-    if len(image_list) == 0:
-        print("✗ No images could be loaded from your dataset!")
-        return
+These multi-scale features will be fed to:
+  - Module 2: Transformer Encoder (not implemented in this demo)
+  - Module 3: Deformable Attention
+  - Module 4: Text Detection/Recognition Heads
+    """)
+    
+    print("="*70)
+    print("Demo completed successfully!")
+    print("="*70)
+    
+    return features_dict, pos_encodings, samples
 
-    print(f"\n✓ Dataset loaded successfully!")
-    print(f"  Total images: {len(image_list)}")
+# ============================================================================
+# 4. Create Sample Dataset Helper
+# ============================================================================
 
-    for i, info in enumerate(image_info):
-        print(f"  Image {i}: {os.path.basename(info['path'])}")
-        print(f"    Size: {info['original_size']} -> {info['tensor_shape']}")
-        print(f"    Annotations: {info['num_annotations']}")
+def create_sample_dataset(output_dir='sample_data'):
+    """Create a minimal sample dataset for testing"""
+    os.makedirs(output_dir, exist_ok=True)
+    img_dir = os.path.join(output_dir, 'images')
+    os.makedirs(img_dir, exist_ok=True)
+    
+    # Create dummy images
+    images = []
+    for i in range(3):
+        # Random sizes to test padding
+        h, w = np.random.randint(200, 400), np.random.randint(300, 500)
+        img = np.random.randint(0, 255, (h, w, 3), dtype=np.uint8)
+        img_pil = Image.fromarray(img)
+        
+        filename = f'sample_{i}.jpg'
+        img_pil.save(os.path.join(img_dir, filename))
+        images.append({'image': filename, 'image_id': i})
+    
+    # Create train.json
+    json_path = os.path.join(output_dir, 'train.json')
+    with open(json_path, 'w') as f:
+        json.dump(images, f, indent=2)
+    
+    print(f"Sample dataset created in {output_dir}/")
+    print(f"  - {len(images)} images in {img_dir}/")
+    print(f"  - Annotations in {json_path}")
+    
+    return json_path, img_dir
 
-    # ========================================================================
-    # Step 2-6: Same VimTS Pipeline as Before
-    # ========================================================================
+# ============================================================================
+# 5. Main Entry Point
+# ============================================================================
 
-    # Step 2: NestedTensor Creation
-    print("\n" + "-"*60)
-    print("STEP 2: Creating NestedTensor from Your Images")
-    print("-"*60)
-
+if __name__ == '__main__':
+    print("VimTS Module 1 Demo - Data Flow Visualization\n")
+    
+    # Check if dataset exists
+    if not os.path.exists('train.json'):
+        print("No train.json found. Creating sample dataset...")
+        json_path, img_dir = create_sample_dataset()
+    else:
+        json_path = 'train.json'
+        img_dir = 'images'
+    
+    # Run the demo
     try:
-        start_time = time.time()
-        nested_tensor = nested_tensor_from_tensor_list(image_list)
-        creation_time = time.time() - start_time
-
-        print(f"✓ NestedTensor created in {creation_time:.3f}s")
-        print(f"  Batched shape: {nested_tensor.tensors.shape}")
-        print(f"  Mask shape: {nested_tensor.mask.shape}")
-
-        if torch.cuda.is_available():
-            nested_tensor = nested_tensor.to(device)
-            print(f"✓ Moved to {device}")
-
+        features, positions, samples = demo_module1_data_flow(
+            json_path=json_path,
+            img_dir=img_dir,
+            num_samples=2
+        )
+        
+        print("\n✓ All transformations completed successfully!")
+        print("\nNext steps:")
+        print("- Features are ready for transformer encoder")
+        print("- Position encodings enable spatial awareness")
+        print("- Multi-scale features capture different levels of detail")
+        
     except Exception as e:
-        print(f"✗ NestedTensor creation failed: {e}")
-        return
-
-    # Step 3: Position Encoding
-    print("\n" + "-"*60)
-    print("STEP 3: Position Encoding")
-    print("-"*60)
-
-    try:
-        pos_encoder = build_position_encoding()
-        if torch.cuda.is_available():
-            pos_encoder = pos_encoder.to(device)
-
-        start_time = time.time()
-        position_encoding = pos_encoder(nested_tensor)
-        pos_time = time.time() - start_time
-
-        print(f"✓ Position encoding computed in {pos_time:.3f}s")
-        print(f"  Shape: {position_encoding.shape}")
-
-    except Exception as e:
-        print(f"✗ Position encoding failed: {e}")
-        return
-
-    # Step 4: Backbone Processing
-    print("\n" + "-"*60)
-    print("STEP 4: Processing Your Images Through VimTS Backbone")
-    print("-"*60)
-
-    try:
-        backbone_model = build_backbone()
-        if torch.cuda.is_available():
-            backbone_model = backbone_model.to(device)
-
-        print("✓ Backbone ready")
-
-        # Process your images
-        start_time = time.time()
-        with torch.cuda.amp.autocast() if torch.cuda.is_available() else torch.no_grad():
-            features, pos_encodings = backbone_model(nested_tensor)
-        backbone_time = time.time() - start_time
-
-        print(f"✓ Your images processed in {backbone_time:.3f}s")
-        print(f"  Feature levels extracted: {len(features)}")
-
-        for i, (feat, pos) in enumerate(zip(features, pos_encodings)):
-            print(f"  Level {i} (1/{4*(2**i)} scale):")
-            print(f"    Features: {feat.tensors.shape}")
-            print(f"    Value range: [{feat.tensors.min():.3f}, {feat.tensors.max():.3f}]")
-
-        # Analyze features for text detection suitability
-        print(f"\n📊 Feature Analysis for Text Detection:")
-        for i, feat in enumerate(features):
-            # Check feature activation patterns
-            feat_data = feat.tensors[0]  # First image
-            mean_activation = feat_data.mean().item()
-            std_activation = feat_data.std().item()
-            max_activation = feat_data.max().item()
-
-            print(f"  Level {i}: Mean={mean_activation:.3f}, Std={std_activation:.3f}, Max={max_activation:.3f}")
-
-            # Features should show some variance (not all zeros/same values)
-            if std_activation > 0.1:
-                print(f"    ✓ Good feature diversity for text detection")
-            else:
-                print(f"    ⚠️ Low feature diversity")
-
-    except Exception as e:
-        print(f"✗ Backbone processing failed: {e}")
+        print(f"\n✗ Error during demo: {e}")
         import traceback
         traceback.print_exc()
-        return
-
-    # Step 5: Test Adapters with Your Data
-    print("\n" + "-"*60)
-    print("STEP 5: Testing Adapters with Your Dataset Features")
-    print("-"*60)
-
-    try:
-        # Test adapters with your actual feature dimensions
-        real_feat = features[0].tensors
-        b, c, h, w = real_feat.shape
-
-        print(f"Testing adapters with your feature dimensions: {real_feat.shape}")
-
-        # Conv_Adapter
-        conv_adapter = Conv_Adapter(c).to(device) if torch.cuda.is_available() else Conv_Adapter(c)
-        adapted_features = conv_adapter(real_feat)
-        print(f"✓ Conv_Adapter: {real_feat.shape} -> {adapted_features.shape}")
-
-        # TA_Adapter (key for cross-domain capability)
-        ta_adapter = TA_Adapter(256).to(device) if torch.cuda.is_available() else TA_Adapter(256)
-        decoder_input = torch.randn(100, b, 256)
-        if torch.cuda.is_available():
-            decoder_input = decoder_input.to(device)
-
-        ta_output = ta_adapter(decoder_input)
-        print(f"✓ TA_Adapter: {decoder_input.shape} -> {ta_output.shape}")
-
-        print(f"✓ Adapters ready for cross-domain text detection!")
-
-    except Exception as e:
-        print(f"✗ Adapter testing failed: {e}")
-
-    # Final Summary
-    print("\n" + "-"*60)
-    print("STEP 6: Your Dataset Processing Summary")
-    print("-"*60)
-
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / 1024**2
-        reserved = torch.cuda.memory_reserved() / 1024**2
-        print(f"GPU Memory: {allocated:.1f}MB allocated, {reserved:.1f}MB reserved")
-
-    total_time = creation_time + pos_time + backbone_time
-    print(f"\nPerformance with your dataset:")
-    print(f"  Processing time: {total_time:.3f}s")
-    print(f"  Throughput: {len(image_list)/total_time:.1f} images/second")
-    print(f"  Average time per image: {total_time/len(image_list):.3f}s")
-
-    print("\n" + "="*80)
-    print("🎉 YOUR DATASET TEST COMPLETED SUCCESSFULLY!")
-    print(f"✅ Processed {len(image_list)} images from your dataset")
-    print(f"✅ Loaded {sum(info['num_annotations'] for info in image_info)} total annotations")
-    print("✅ Features extracted and ready for text detection")
-    print("✅ Cross-domain adapters functioning correctly")
-    print("✅ Ready for Module 3: Transformer Architecture")
-    print("="*80)
-
-    return features, pos_encodings, image_info
-
-# ============================================================================
-# Helper Functions for Your Dataset
-# ============================================================================
-
-def analyze_dataset_json(json_file):
-    """
-    Analyze your JSON file structure without loading images
-    """
-    print(f"Analyzing dataset: {json_file}")
-    data, format_type = load_dataset_json(json_file)
-
-    if data is None:
-        return
-
-    parsed_data = parse_annotations(data, format_type)
-
-    print(f"\nDataset Analysis:")
-    print(f"  Format: {format_type}")
-    print(f"  Images: {len(parsed_data)}")
-
-    if parsed_data:
-        total_annotations = sum(len(entry['annotations']) for entry in parsed_data)
-        print(f"  Total annotations: {total_annotations}")
-        print(f"  Avg annotations per image: {total_annotations/len(parsed_data):.1f}")
-
-        print(f"\nSample entries:")
-        for i, entry in enumerate(parsed_data[:3]):
-            print(f"  {i+1}. {entry['image_path']} ({len(entry['annotations'])} annotations)")
-
-def quick_single_image_test(images_dir, json_file, image_index=0):
-    """
-    Quick test with a single image from your dataset
-    """
-    data, format_type = load_dataset_json(json_file)
-    parsed_data = parse_annotations(data, format_type)
-
-    if image_index >= len(parsed_data):
-        print(f"Image index {image_index} out of range (0-{len(parsed_data)-1})")
-        return
-
-    entry = parsed_data[image_index]
-    print(f"Testing single image: {entry['image_path']}")
-
-    image_list, image_info = create_local_dataset_batch(images_dir, json_file, max_images=1)
-
-    if image_list:
-        print("✓ Single image processed successfully!")
-        return image_list[0], image_info[0]
-
-run_vimts_local_dataset_test(r'G:\sample\img', r'G:\sample\train.json', max_images=10, visualize_annotations=True)
-print("Local Dataset Testing Functions Loaded!")
-print("Available functions:")
-print("- run_vimts_local_dataset_test(images_dir, json_file, max_images=5)")  
-print("- analyze_dataset_json(json_file)")
-print("- quick_single_image_test(images_dir, json_file, image_index=0)")
