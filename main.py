@@ -1,10 +1,8 @@
 """
 VimTS Feature Extraction Module Demo
 Implements: ResNet50 → REM → Transformer Encoder Pipeline
-
 This script demonstrates the complete feature extraction pipeline described in Section III-A
 """
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,12 +13,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # Import from the modules (assuming they're available)
-# from util import *
-# from rem_and_adapter import *
-
-# ============================================================================
-# Component Implementations
-# ============================================================================
+from util import *
+from rem_and_adapter import *
 
 class REM(nn.Module):
     """
@@ -308,7 +302,7 @@ Total Parameters: {sum(p.numel() for p in features_dict['model'].parameters())/1
     return fig
 
 
-def demo_feature_extraction(image_path=None, json_path='train.json'):
+def demo_feature_extraction(image_path, json_path):
     """
     Main demo function for Feature Extraction Module
     """
@@ -389,7 +383,7 @@ def demo_feature_extraction(image_path=None, json_path='train.json'):
 
 if __name__ == "__main__":
     # Run the demo
-    features, model = demo_feature_extraction()
+    features, model = demo_feature_extraction(r'/content/drive/MyDrive/sample/img', r'/content/drive/MyDrive/sample/train.json')
     
     print("\n" + "="*70)
     print("Demo completed successfully!")
