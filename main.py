@@ -312,13 +312,27 @@ Total Parameters: {sum(p.numel() for p in features_dict['model'].parameters())/1
     plt.tight_layout()
     return fig
 
-def demo_feature_extraction(image_dir, json_path):
+def demo_feature_extraction(image_dir, json_path, use_pretrained=False, device='cpu'):
     """
     Main demo function for Feature Extraction Module
+    
+    Args:
+        image_dir: Directory containing images
+        json_path: Path to JSON file
+        use_pretrained: Whether to use pretrained ResNet weights (requires download)
+        device: 'cuda' or 'cpu'
     """
     print("="*70)
     print("VimTS Feature Extraction Module Demo")
     print("="*70)
+    
+    # Check device
+    if device == 'cuda' and torch.cuda.is_available():
+        device = torch.device('cuda')
+        print(f"✓ Using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        device = torch.device('cpu')
+        print("✓ Using CPU (this may be slow)")
     
     # Load dataset
     print("\n[1/5] Loading dataset...")
@@ -354,26 +368,41 @@ def demo_feature_extraction(image_dir, json_path):
     # Preprocess image
     print("\n[3/5] Preprocessing image...")
     img_tensor = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
-    img_tensor = F.interpolate(img_tensor.unsqueeze(0), size=(512, 512), mode='bilinear')
+    # Resize to smaller size for faster processing
+    img_tensor = F.interpolate(img_tensor.unsqueeze(0), size=(256, 256), mode='bilinear')
     
     # Normalize (ImageNet stats)
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
     img_tensor = (img_tensor - mean) / std
+    img_tensor = img_tensor.to(device)
     print(f"✓ Preprocessed to shape: {img_tensor.shape}")
     
     # Build model
     print("\n[4/5] Building Feature Extraction Module...")
-    model = FeatureExtractionModule(pretrained=False)  # Set True if you have internet
+    if use_pretrained:
+        print("  ⚠ Downloading pretrained weights (this may take a while)...")
+    model = FeatureExtractionModule(pretrained=use_pretrained)
+    model = model.to(device)
     model.eval()
-    print("✓ Model built successfully")
+    
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"✓ Model built successfully ({total_params/1e6:.2f}M parameters)")
     
     # Forward pass
     print("\n[5/5] Extracting features...")
+    print("  Processing ResNet backbone...")
     with torch.no_grad():
         features = model(img_tensor)
     
-    features['model'] = model  # Store for visualization
+    # Move features back to CPU for visualization
+    features['resnet_features'] = [f.cpu() for f in features['resnet_features']]
+    features['rem_features'] = features['rem_features'].cpu()
+    features['enhanced_features'] = features['enhanced_features'].cpu()
+    features['model'] = model
+    
+    print("✓ Feature extraction complete!")
     
     print("\n" + "="*70)
     print("Feature Extraction Complete!")
@@ -395,6 +424,8 @@ def demo_feature_extraction(image_dir, json_path):
     
     # Visualize
     fig = visualize_feature_maps(features, img, image_id)
+    plt.savefig('feature_extraction_demo.png', dpi=150, bbox_inches='tight')
+    print("✓ Visualization saved as 'feature_extraction_demo.png'")
     plt.show()
     
     return features, model
@@ -402,9 +433,15 @@ def demo_feature_extraction(image_dir, json_path):
 if __name__ == "__main__":
     # Run the demo
     # Pass the directory containing images and the JSON file path
+    
+    # Check if GPU is available
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
     features, model = demo_feature_extraction(
-        r'/content/drive/MyDrive/sample/img',  # Directory containing images
-        r'/content/drive/MyDrive/sample/train.json'  # JSON file with image metadata
+        image_dir=r'/content/drive/MyDrive/sample/img',  # Directory containing images
+        json_path=r'/content/drive/MyDrive/sample/train.json',  # JSON file with image metadata
+        use_pretrained=False,  # Set to True to use pretrained weights (slower first run)
+        device=device  # Auto-detect GPU/CPU
     )
     
     print("\n" + "="*70)
