@@ -11,6 +11,8 @@ import numpy as np
 from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
 
 # Import from the modules (assuming they're available)
 from util import *
@@ -69,12 +71,12 @@ class SimpleTransformerEncoder(nn.Module):
         super().__init__()
         self.d_model = d_model
         
-        # Multi-scale feature projection
+        # Multi-scale feature projection (match ResNet output channels)
         self.input_proj = nn.ModuleList([
-            nn.Conv2d(256, d_model, kernel_size=1),
-            nn.Conv2d(512, d_model, kernel_size=1),
-            nn.Conv2d(1024, d_model, kernel_size=1),
-            nn.Conv2d(2048, d_model, kernel_size=1),
+            nn.Conv2d(256, d_model, kernel_size=1),   # C2: 256 channels
+            nn.Conv2d(512, d_model, kernel_size=1),   # C3: 512 channels
+            nn.Conv2d(1024, d_model, kernel_size=1),  # C4: 1024 channels
+            nn.Conv2d(2048, d_model, kernel_size=1),  # C5: 2048 channels
         ])
         
         # Transformer encoder layers
@@ -88,19 +90,30 @@ class SimpleTransformerEncoder(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Position encoding
-        self.pos_embed = nn.Parameter(torch.randn(1, 100, d_model))
+        # Position encoding (will be dynamically adjusted)
+        self.register_buffer('pos_scale', torch.tensor(1.0))
+        
+    def get_position_encoding(self, seq_len, d_model):
+        """Generate sinusoidal position encoding"""
+        position = torch.arange(seq_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
+        
+        pos_encoding = torch.zeros(seq_len, d_model)
+        pos_encoding[:, 0::2] = torch.sin(position * div_term)
+        pos_encoding[:, 1::2] = torch.cos(position * div_term)
+        
+        return pos_encoding.unsqueeze(0)  # Add batch dimension
         
     def forward(self, features_list):
         """
         Args:
-            features_list: List of feature maps from different ResNet stages
+            features_list: List of feature maps from different ResNet stages [C2, C3, C4, C5]
         Returns:
             Enhanced features with long-range dependencies
         """
         # Project all features to same dimension
         projected_features = []
-        for feat, proj in zip(features_list, self.input_proj[:len(features_list)]):
+        for feat, proj in zip(features_list, self.input_proj):
             projected = proj(feat)
             B, C, H, W = projected.shape
             # Flatten spatial dimensions
@@ -110,17 +123,9 @@ class SimpleTransformerEncoder(nn.Module):
         # Concatenate multi-scale features
         all_features = torch.cat(projected_features, dim=1)  # B, total_HW, C
         
-        # Add position encoding (truncate or pad as needed)
+        # Add position encoding (dynamically generated)
         seq_len = all_features.shape[1]
-        if seq_len <= self.pos_embed.shape[1]:
-            pos = self.pos_embed[:, :seq_len, :]
-        else:
-            pos = F.interpolate(
-                self.pos_embed.transpose(1, 2),
-                size=seq_len,
-                mode='linear'
-            ).transpose(1, 2)
-        
+        pos = self.get_position_encoding(seq_len, self.d_model).to(all_features.device)
         all_features = all_features + pos
         
         # Apply transformer encoder
@@ -165,16 +170,19 @@ class FeatureExtractionModule(nn.Module):
         x = self.relu(x)
         x = self.maxpool(x)
         
-        c2 = self.layer1(x)   # 1/4 resolution
-        c3 = self.layer2(c2)  # 1/8 resolution
-        c4 = self.layer3(c3)  # 1/16 resolution
-        c5 = self.layer4(c4)  # 1/32 resolution
+        c2 = self.layer1(x)   # 1/4 resolution, 256 channels
+        c3 = self.layer2(c2)  # 1/8 resolution, 512 channels
+        c4 = self.layer3(c3)  # 1/16 resolution, 1024 channels
+        c5 = self.layer4(c4)  # 1/32 resolution, 2048 channels
         
         # Step 2: Apply REM to enhance receptive field
+        # REM takes C5 (2048 channels) and outputs 256 channels
         rem_output = self.rem(c5)
         
         # Step 3: Combine features and apply Transformer Encoder
-        features_list = [c2, c3, c4, rem_output]
+        # Pass original ResNet features (with correct channel counts) + REM output
+        # The transformer will project them to the same dimension
+        features_list = [c2, c3, c4, c5]  # Use C5 instead of REM here
         enhanced_features = self.transformer_encoder(features_list)
         
         return {
@@ -380,6 +388,7 @@ def demo_feature_extraction(image_path, json_path):
     plt.show()
     
     return features, model
+
 
 if __name__ == "__main__":
     # Run the demo
