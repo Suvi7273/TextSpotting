@@ -1,8 +1,11 @@
+
 """
 VimTS Feature Extraction Module Demo
 Implements: ResNet50 → REM → Transformer Encoder Pipeline
+
 This script demonstrates the complete feature extraction pipeline described in Section III-A
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -309,8 +312,7 @@ Total Parameters: {sum(p.numel() for p in features_dict['model'].parameters())/1
     plt.tight_layout()
     return fig
 
-
-def demo_feature_extraction(image_path, json_path):
+def demo_feature_extraction(image_dir, json_path):
     """
     Main demo function for Feature Extraction Module
     """
@@ -323,23 +325,31 @@ def demo_feature_extraction(image_path, json_path):
     dataset = load_dataset_info(json_path)
     print(f"✓ Loaded dataset with {len(dataset['images'])} images")
     
-    # Select an image
-    if image_path is None:
-        sample_img_info = dataset['images'][0]
-        image_path = sample_img_info['file_name']
-        print(f"✓ Using sample image: {image_path} ({sample_img_info['width']}×{sample_img_info['height']})")
+    # Select an image from the dataset
+    sample_img_info = dataset['images'][0]
+    image_filename = sample_img_info['file_name']
+    image_id = sample_img_info['id']
     
-    # Create dummy image if file doesn't exist
+    # Construct full image path from directory + filename
+    if image_dir is not None:
+        image_path = str(Path(image_dir) / image_filename)
+    else:
+        image_path = image_filename
+    
+    print(f"✓ Using sample image: {image_filename} ({sample_img_info['width']}×{sample_img_info['height']})")
+    print(f"  Full path: {image_path}")
+    
+    # Load image
     print("\n[2/5] Loading image...")
     try:
         img = Image.open(image_path).convert('RGB')
-    except:
-        print("  ⚠ Image file not found, creating dummy image...")
+        print(f"✓ Image loaded: {img.size[0]}×{img.size[1]}")
+    except Exception as e:
+        print(f"  ⚠ Image file not found ({e}), creating dummy image...")
         img = Image.new('RGB', (512, 512), color=(100, 150, 200))
         draw = ImageDraw.Draw(img)
         draw.text((256, 256), "Sample Text", fill=(255, 255, 255))
-    
-    print(f"✓ Image loaded: {img.size[0]}×{img.size[1]}")
+        print(f"✓ Dummy image created: {img.size[0]}×{img.size[1]}")
     
     # Preprocess image
     print("\n[3/5] Preprocessing image...")
@@ -384,15 +394,18 @@ def demo_feature_extraction(image_path, json_path):
     print("="*70 + "\n")
     
     # Visualize
-    fig = visualize_feature_maps(features, img, dataset['images'][0]['id'])
+    fig = visualize_feature_maps(features, img, image_id)
     plt.show()
     
     return features, model
 
-
 if __name__ == "__main__":
     # Run the demo
-    features, model = demo_feature_extraction(r'/content/drive/MyDrive/sample/img', r'/content/drive/MyDrive/sample/train.json')
+    # Pass the directory containing images and the JSON file path
+    features, model = demo_feature_extraction(
+        r'/content/drive/MyDrive/sample/img',  # Directory containing images
+        r'/content/drive/MyDrive/sample/train.json'  # JSON file with image metadata
+    )
     
     print("\n" + "="*70)
     print("Demo completed successfully!")
