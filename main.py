@@ -216,7 +216,7 @@ if __name__ == "__main__":
     # Training parameters
     BATCH_SIZE = 1 # Keep at 1 for now due to complexity of collate_fn for DETR targets
     LEARNING_RATE = 1e-4
-    NUM_EPOCHS = 10 # Increase for more "learning" (even with random init)
+    NUM_EPOCHS = 50 # Increase for more "learning" (even with random init)
 
     transform = transforms.Compose([
         transforms.Resize((512, 512)),
@@ -231,7 +231,7 @@ if __name__ == "__main__":
 
     # --- Initialize Full Model ---
     model = VimTSFullModel(
-        resnet_pretrained=False, # Set to True for real training to get better features
+        resnet_pretrained=True, # Set to True for real training to get better features
         rem_in_channels=1024,
         rem_out_channels=FEATURE_DIM,
         transformer_feature_dim=FEATURE_DIM,
