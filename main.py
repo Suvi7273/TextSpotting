@@ -265,6 +265,7 @@ class TotalTextDataset(torch.utils.data.Dataset):
 
 # --- Visualization Function ---
 def visualize_output(original_image_path, model_output, gt_info, show_gt=True, show_preds=True, score_threshold=0.5):
+    %matplotlib inline
     """
     Visualizes the original image with ground truth and predicted bounding boxes/polygons.
     
@@ -277,9 +278,6 @@ def visualize_output(original_image_path, model_output, gt_info, show_gt=True, s
         score_threshold (float): Minimum score for predicted bounding boxes to be shown.
     """
     image = Image.open(original_image_path).convert('RGB')
-    if not image:
-        print(f"Failed to load image at {original_image_path}")
-        return
     draw = ImageDraw.Draw(image)
     
     img_width, img_height = image.size
@@ -361,7 +359,6 @@ if __name__ == "__main__":
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    # --- Data Loading ---
     dataset = TotalTextDataset(json_path=JSON_PATH, img_dir=IMAGE_DIR, transform=transform)
     
     # Pick a random image from the dataset to visualize
@@ -370,8 +367,8 @@ if __name__ == "__main__":
 
     image_tensor, gt_info = dataset[sample_idx]
     
-    # Ensure image_tensor is a batch for the model
-    image_tensor = image_tensor.unsqueeze(0) # Add batch dimension: (C, H, W) -> (1, C, H, W)
+    print(f"GT BBoxes for image {gt_info['file_name']}: {gt_info['gt_bboxes'].shape}")
+    print(f"GT Polygons for image {gt_info['file_name']}: {len(gt_info['gt_polygons'])} instances")
 
     # --- Initialize Module 1 ---
     # Set pretrained=True for real usage to leverage ImageNet weights
@@ -396,15 +393,18 @@ if __name__ == "__main__":
     print(f"Detection Queries shape: {output_m1['detection_queries'].shape}")
     print(f"Recognition Queries shape: {output_m1['recognition_queries'].shape}")
     print(f"Coarse BBoxes and Scores shape (cx,cy,w,h,obj_score): {output_m1['coarse_bboxes_and_scores'].shape}")
-
-    # --- Visualization ---
-    original_image_filename = gt_info['file_name']
-    original_image_full_path = os.path.join(IMAGE_DIR, original_image_filename)
     
+    # Add this to check predicted bboxes and scores
+    pred_bboxes_raw = output_m1['coarse_bboxes_and_scores'][0]
+    print(f"Number of predicted bboxes before score filtering: {pred_bboxes_raw.shape[0]}")
+    high_score_preds = [b for b in pred_bboxes_raw if b[4] >= 0.5] # b[4] is the score
+    print(f"Number of predicted bboxes with score >= 0.5: {len(high_score_preds)}")
+
+
     print(f"\nVisualizing output for image: {original_image_filename}")
     visualize_output(original_image_full_path, output_m1, gt_info, 
                      show_gt=True, show_preds=True, score_threshold=0.5)
-
+    
     print("done!!")
     
     # print("\n--- Additional Notes ---")
