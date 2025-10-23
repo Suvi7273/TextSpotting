@@ -3,6 +3,7 @@
 import torch
 from scipy.optimize import linear_sum_assignment
 import torch.nn.functional as F
+import torch.nn as nn
 
 # Utilities for box format conversion
 def box_cxcywh_to_xyxy(x):
