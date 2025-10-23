@@ -1,449 +1,415 @@
-
-"""
-VimTS Feature Extraction Module Demo
-Implements: ResNet50 → REM → Transformer Encoder Pipeline
-
-This script demonstrates the complete feature extraction pipeline described in Section III-A
-"""
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torchvision.models as models
+import torchvision.transforms as transforms
+from PIL import Image, ImageDraw
 import json
 import numpy as np
-from PIL import Image, ImageDraw
+import os
 import matplotlib.pyplot as plt
-from pathlib import Path
-import warnings
-warnings.filterwarnings('ignore')
+import matplotlib.patches as patches
+import random
 
-# Import from the modules (assuming they're available)
-from util import *
-from rem_and_adapter import *
+# --- 1. Feature Extraction Components (from previous response, slightly refined) ---
 
-class REM(nn.Module):
+class ResNet50Backbone(nn.Module):
     """
-    Receptive Enhancement Module (REM)
-    Enlarges the receptive field using large kernel convolution for downsampling
-    """
-    def __init__(self, in_channels=2048, out_channels=256, kernel_size=7):
-        super().__init__()
-        # Large kernel convolution to expand receptive field
-        self.large_kernel_conv = nn.Conv2d(
-            in_channels, 
-            out_channels, 
-            kernel_size=kernel_size,
-            stride=2,  # Downsample
-            padding=kernel_size//2,
-            bias=False
-        )
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
-        
-        # Additional refinement convolution
-        self.refine_conv = nn.Conv2d(
-            out_channels,
-            out_channels,
-            kernel_size=3,
-            padding=1,
-            bias=False
-        )
-        self.refine_bn = nn.BatchNorm2d(out_channels)
-        
-    def forward(self, x):
-        # Apply large kernel convolution for receptive field enhancement
-        x = self.large_kernel_conv(x)
-        x = self.bn(x)
-        x = self.relu(x)
-        
-        # Refine features
-        identity = x
-        x = self.refine_conv(x)
-        x = self.refine_bn(x)
-        x = self.relu(x + identity)
-        
-        return x
-
-
-class SimpleTransformerEncoder(nn.Module):
-    """
-    Simplified Transformer Encoder for feature enhancement
-    Inspired by Deformable DETR
-    """
-    def __init__(self, d_model=256, nhead=8, num_layers=3, dim_feedforward=1024):
-        super().__init__()
-        self.d_model = d_model
-        
-        # Multi-scale feature projection (match ResNet output channels)
-        self.input_proj = nn.ModuleList([
-            nn.Conv2d(256, d_model, kernel_size=1),   # C2: 256 channels
-            nn.Conv2d(512, d_model, kernel_size=1),   # C3: 512 channels
-            nn.Conv2d(1024, d_model, kernel_size=1),  # C4: 1024 channels
-            nn.Conv2d(2048, d_model, kernel_size=1),  # C5: 2048 channels
-        ])
-        
-        # Transformer encoder layers
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=0.1,
-            activation='relu',
-            batch_first=True
-        )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        # Position encoding (will be dynamically adjusted)
-        self.register_buffer('pos_scale', torch.tensor(1.0))
-        
-    def get_position_encoding(self, seq_len, d_model):
-        """Generate sinusoidal position encoding"""
-        position = torch.arange(seq_len, dtype=torch.float32).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
-        
-        pos_encoding = torch.zeros(seq_len, d_model)
-        pos_encoding[:, 0::2] = torch.sin(position * div_term)
-        pos_encoding[:, 1::2] = torch.cos(position * div_term)
-        
-        return pos_encoding.unsqueeze(0)  # Add batch dimension
-        
-    def forward(self, features_list):
-        """
-        Args:
-            features_list: List of feature maps from different ResNet stages [C2, C3, C4, C5]
-        Returns:
-            Enhanced features with long-range dependencies
-        """
-        # Project all features to same dimension
-        projected_features = []
-        for feat, proj in zip(features_list, self.input_proj):
-            projected = proj(feat)
-            B, C, H, W = projected.shape
-            # Flatten spatial dimensions
-            projected = projected.flatten(2).transpose(1, 2)  # B, HW, C
-            projected_features.append(projected)
-        
-        # Concatenate multi-scale features
-        all_features = torch.cat(projected_features, dim=1)  # B, total_HW, C
-        
-        # Add position encoding (dynamically generated)
-        seq_len = all_features.shape[1]
-        pos = self.get_position_encoding(seq_len, self.d_model).to(all_features.device)
-        all_features = all_features + pos
-        
-        # Apply transformer encoder
-        enhanced_features = self.transformer_encoder(all_features)
-        
-        return enhanced_features
-
-
-class FeatureExtractionModule(nn.Module):
-    """
-    Complete Feature Extraction Module
-    Pipeline: ResNet50 → REM → Transformer Encoder
+    ResNet50 backbone for feature extraction.
+    Uses layers up to layer3 (conv4_x stage) as described in many detection papers
+    to get features before significant downsampling.
     """
     def __init__(self, pretrained=True):
         super().__init__()
-        
-        # Step 1: ResNet50 Backbone
-        import torchvision.models as models
         resnet = models.resnet50(pretrained=pretrained)
-        
-        # Extract intermediate layers
-        self.conv1 = resnet.conv1
-        self.bn1 = resnet.bn1
-        self.relu = resnet.relu
-        self.maxpool = resnet.maxpool
-        
-        self.layer1 = resnet.layer1  # 256 channels
-        self.layer2 = resnet.layer2  # 512 channels
-        self.layer3 = resnet.layer3  # 1024 channels
-        self.layer4 = resnet.layer4  # 2048 channels
-        
-        # Step 2: REM for receptive field enhancement
-        self.rem = REM(in_channels=2048, out_channels=256)
-        
-        # Step 3: Transformer Encoder for long-range dependencies
-        self.transformer_encoder = SimpleTransformerEncoder(d_model=256, nhead=8, num_layers=3)
-        
+        # Features up to layer3 (output stride 16, channels 1024)
+        # Can adjust to layer4 (output stride 32, channels 2048) if needed
+        self.features = nn.Sequential(
+            resnet.conv1,
+            resnet.bn1,
+            resnet.relu,
+            resnet.maxpool,
+            resnet.layer1,
+            resnet.layer2,
+            resnet.layer3, # Output of layer3 usually has 1024 channels
+        )
+
     def forward(self, x):
-        # Step 1: Extract features through ResNet50
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
+        return self.features(x)
+
+class ReceptiveEnhancementModule(nn.Module):
+    """
+    Receptive Enhancement Module (REM) as described in the paper.
+    Uses a convolutional layer with a large kernel to enlarge the receptive field.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, stride=1):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size,
+                              padding=padding, stride=stride)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.bn(self.conv(x)))
+
+class TransformerEncoder(nn.Module):
+    """
+    Simplified Transformer Encoder.
+    In a full implementation, positional encodings would be crucial.
+    """
+    def __init__(self, feature_dim, num_heads, num_layers, dropout=0.1):
+        super().__init__()
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=feature_dim, nhead=num_heads, dim_feedforward=feature_dim * 4,
+            dropout=dropout, batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+    def forward(self, x):
+        # x is assumed to be (Batch, Channel, Height, Width)
+        b, c, h, w = x.shape
+        x = x.flatten(2).permute(0, 2, 1) # Reshape to (B, H*W, C) for Transformer
         
-        c2 = self.layer1(x)   # 1/4 resolution, 256 channels
-        c3 = self.layer2(c2)  # 1/8 resolution, 512 channels
-        c4 = self.layer3(c3)  # 1/16 resolution, 1024 channels
-        c5 = self.layer4(c4)  # 1/32 resolution, 2048 channels
+        # In a real implementation, you'd add positional embeddings here
+        # E.g., x = x + self.pos_embed(h, w)
         
-        # Step 2: Apply REM to enhance receptive field
-        # REM takes C5 (2048 channels) and outputs 256 channels
-        rem_output = self.rem(c5)
+        output = self.transformer_encoder(x)
+        return output # (B, H*W, C)
+
+# --- 2. Task-aware Query Initialization (TAQI) ---
+
+class TaskAwareQueryInitialization(nn.Module):
+    """
+    Conceptual Task-aware Query Initialization (TAQI).
+    This is highly simplified for demonstration.
+    A real TAQI (like in ESTextSpotter) would involve learnable query embeddings
+    that interact with image features through attention to propose bounding boxes
+    and initialize task-specific queries.
+    """
+    def __init__(self, feature_dim, num_queries, num_detection_tokens=None, num_recognition_tokens=None):
+        super().__init__()
+        self.num_queries = num_queries
         
-        # Step 3: Combine features and apply Transformer Encoder
-        # Pass original ResNet features (with correct channel counts) + REM output
-        # The transformer will project them to the same dimension
-        features_list = [c2, c3, c4, c5]  # Use C5 instead of REM here
-        enhanced_features = self.transformer_encoder(features_list)
+        # Learnable embeddings for initial queries
+        self.query_embed = nn.Embedding(num_queries, feature_dim)
         
+        # Simplified heads for initial coarse bbox prediction (cx, cy, w, h, objectness)
+        # In a real DETR-like model, these would be prediction heads on the output of
+        # a Transformer Decoder, or from learned object queries.
+        self.bbox_coord_head = nn.Linear(feature_dim, 4) # (cx, cy, w, h)
+        self.bbox_score_head = nn.Linear(feature_dim, 1) # objectness score
+
+        # In ESTextSpotter, detection and recognition queries are often derived
+        # from the same set of learnable queries, potentially with different linear
+        # transformations or attention mechanisms.
+        # For simplicity, we can use a portion of the main queries or separate embeddings.
+        # The paper suggests "extracted within the coarse bounding box coordinates" for recognition
+        # and "transform the bounding box coordinates" for detection.
+        # This implies a more complex interaction than simple embeddings.
+
+        # For this demo, we will generate dummy queries with the correct shape.
+        # In a true impl, num_detection_tokens and num_recognition_tokens might
+        # refer to the length of recognition sequence or dimensionality of query.
+        # We assume they refer to the feature_dim here for simplicity.
+        self.detection_query_project = nn.Linear(feature_dim, feature_dim)
+        self.recognition_query_project = nn.Linear(feature_dim, feature_dim)
+
+    def forward(self, encoded_features):
+        # encoded_features: (B, H*W, Feature_dim) from TransformerEncoder
+
+        # The paper states "a liner layer to output the coarse bounding box coordinates
+        # and probabilities. Then, the top N coarse bounding box coordinates are selected".
+        # This can be implemented by applying a prediction head to a set of learned queries
+        # that interact with the encoded_features.
+        
+        # For this conceptual example, let's just use our learned `query_embed`
+        # as the initial queries that get "predicted" on.
+        
+        # Expand queries to batch size
+        initial_queries = self.query_embed.weight.unsqueeze(0).repeat(encoded_features.shape[0], 1, 1) # (B, num_queries, feature_dim)
+
+        # In a real model, `initial_queries` would interact with `encoded_features`
+        # (e.g., through cross-attention in a Decoder) to produce refined query embeddings.
+        # For Module 1, we'll treat these as our "query features" from which bboxes are predicted.
+        
+        # Predict coarse bounding box coordinates and scores from initial queries
+        # Apply sigmoid to normalize coordinates to [0,1] and scores to [0,1]
+        coarse_bboxes_coords = self.bbox_coord_head(initial_queries).sigmoid() # (B, num_queries, 4)
+        coarse_bboxes_scores = self.bbox_score_head(initial_queries).sigmoid() # (B, num_queries, 1)
+        
+        coarse_bboxes_and_scores = torch.cat([coarse_bboxes_coords, coarse_bboxes_scores], dim=-1) # (B, num_queries, 5)
+
+        # "Then, the top N coarse bounding box coordinates are selected based on the probabilities."
+        # For this demo, we'll just use all `num_queries` as our 'N'.
+        # In practice, you'd sort by scores and pick the top ones.
+
+        # Generate initial detection and recognition queries from the initial queries (or refined ones)
+        # The paper's description suggests a more intricate derivation based on the coarse bboxes.
+        # Here, we project the `initial_queries` to get task-specific query embeddings.
+        detection_queries = self.detection_query_project(initial_queries) # (B, num_queries, feature_dim)
+        recognition_queries = self.recognition_query_project(initial_queries) # (B, num_queries, feature_dim)
+
+        return encoded_features, detection_queries, recognition_queries, coarse_bboxes_and_scores
+
+# --- Overall Module 1 Wrapper ---
+class VimTSModule1(nn.Module):
+    def __init__(self, resnet_pretrained=True,
+                 rem_in_channels=1024, rem_out_channels=1024,
+                 transformer_feature_dim=1024, transformer_num_heads=8, transformer_num_layers=3,
+                 num_queries=100):
+        super().__init__()
+        self.resnet_backbone = ResNet50Backbone(pretrained=resnet_pretrained)
+        self.receptive_enhancement_module = ReceptiveEnhancementModule(
+            in_channels=rem_in_channels, out_channels=rem_out_channels
+        )
+        self.transformer_encoder = TransformerEncoder(
+            feature_dim=transformer_feature_dim,
+            num_heads=transformer_num_heads,
+            num_layers=transformer_num_layers
+        )
+        self.task_aware_query_init = TaskAwareQueryInitialization(
+            feature_dim=transformer_feature_dim,
+            num_queries=num_queries
+        )
+
+    def forward(self, img):
+        # 1. Feature Extraction
+        resnet_features = self.resnet_backbone(img)
+        rem_features = self.receptive_enhancement_module(resnet_features)
+        
+        # The paper says "The output of the REM and ResNet are sent into a Transformer encoder"
+        # This implies either concatenation or using features from different scales.
+        # For simplicity, we'll use REM features as primary input to the Transformer Encoder here.
+        # In a real model, often multi-scale features are used.
+        encoded_image_features = self.transformer_encoder(rem_features)
+
+        # 2. Task-aware Query Initialization
+        encoded_features_for_decoder, detection_queries, recognition_queries, coarse_bboxes_and_scores = \
+            self.task_aware_query_init(encoded_image_features)
+
         return {
-            'resnet_features': [c2, c3, c4, c5],
-            'rem_features': rem_output,
-            'enhanced_features': enhanced_features,
-            'feature_shapes': [(f.shape[2], f.shape[3]) for f in [c2, c3, c4, c5]]
+            "encoded_image_features": encoded_features_for_decoder,
+            "detection_queries": detection_queries,
+            "recognition_queries": recognition_queries,
+            "coarse_bboxes_and_scores": coarse_bboxes_and_scores
         }
 
+# --- TotalText Dataset Loader ---
+class TotalTextDataset(torch.utils.data.Dataset):
+    def __init__(self, json_path, img_dir, transform=None):
+        self.img_dir = img_dir
+        self.transform = transform
+        
+        with open(json_path, 'r') as f:
+            self.data = json.load(f)
+        
+        self.images = self.data['images']
+        self.annotations = self.data['annotations']
+        
+        # Map image_id to annotations
+        self.img_id_to_annotations = {}
+        for ann in self.annotations:
+            image_id = ann['image_id']
+            if image_id not in self.img_id_to_annotations:
+                self.img_id_to_annotations[image_id] = []
+            self.img_id_to_annotations[image_id].append(ann)
+            
+        # Filter out images without annotations if necessary, or just use images directly
+        self.image_infos = {img['id']: img for img in self.images}
 
-# ============================================================================
-# Visualization and Demo Functions
-# ============================================================================
+    def __len__(self):
+        return len(self.images)
 
-def load_dataset_info(json_path='train.json'):
-    """Load dataset information from JSON file"""
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-    return data
+    def __getitem__(self, idx):
+        img_info = self.images[idx]
+        img_id = img_info['id']
+        img_filename = img_info['file_name']
+        img_path = os.path.join(self.img_dir, img_filename)
 
+        image = Image.open(img_path).convert('RGB')
+        
+        # Get annotations for this image
+        annotations = self.img_id_to_annotations.get(img_id, [])
+        
+        # Process annotations: extract bbox and polygon
+        # For simplicity, we'll convert segmentation polygons to a list of lists of floats
+        # and bboxes to [x_min, y_min, width, height]
+        gt_bboxes = [] # [x_min, y_min, width, height]
+        gt_polygons = [] # list of [x1, y1, x2, y2, ...]
+        
+        for ann in annotations:
+            # Bbox format in COCO is [x_min, y_min, width, height]
+            gt_bboxes.append(ann['bbox']) 
+            # Segmentation is a list of polygons, each polygon is [x1, y1, x2, y2, ...]
+            # TotalText often uses a single segmentation polygon per instance
+            if ann['segmentation']:
+                gt_polygons.extend(ann['segmentation']) # extend to flatten list if multiple polys per instance
+            
+        gt_bboxes = torch.tensor(gt_bboxes, dtype=torch.float32) if gt_bboxes else torch.empty((0, 4), dtype=torch.float32)
+        
+        # If transform is applied, it will handle resizing/normalization
+        if self.transform:
+            image_tensor = self.transform(image)
+        else:
+            image_tensor = transforms.ToTensor()(image) # Default to Tensor conversion
+            
+        # We need original dimensions for visualization later
+        original_width, original_height = image.size
 
-def visualize_feature_maps(features_dict, original_img, image_id):
-    """Visualize the extracted features at different stages"""
-    fig, axes = plt.subplots(3, 4, figsize=(16, 12))
-    fig.suptitle(f'VimTS Feature Extraction Pipeline - Image {image_id}', fontsize=16, fontweight='bold')
-    
-    # Original image
-    axes[0, 0].imshow(original_img)
-    axes[0, 0].set_title('Original Image', fontweight='bold')
-    axes[0, 0].axis('off')
-    
-    # ResNet features at different scales
-    resnet_feats = features_dict['resnet_features']
-    titles = ['ResNet C2 (1/4)', 'ResNet C3 (1/8)', 'ResNet C4 (1/16)', 'ResNet C5 (1/32)']
-    
-    for idx, (feat, title) in enumerate(zip(resnet_feats, titles)):
-        # Take mean across channels for visualization
-        feat_map = feat[0].mean(dim=0).detach().cpu().numpy()
-        im = axes[0, idx].imshow(feat_map, cmap='viridis')
-        axes[0, idx].set_title(f'{title}\n{feat.shape[2]}x{feat.shape[3]}', fontsize=10)
-        axes[0, idx].axis('off')
-        plt.colorbar(im, ax=axes[0, idx], fraction=0.046)
-    
-    # REM output
-    rem_feat = features_dict['rem_features']
-    rem_map = rem_feat[0].mean(dim=0).detach().cpu().numpy()
-    im = axes[1, 0].imshow(rem_map, cmap='plasma')
-    axes[1, 0].set_title(f'REM Output\n{rem_feat.shape[2]}x{rem_feat.shape[3]}', fontsize=10, fontweight='bold')
-    axes[1, 0].axis('off')
-    plt.colorbar(im, ax=axes[1, 0], fraction=0.046)
-    
-    # Enhanced features from Transformer (reshape first few tokens)
-    enhanced = features_dict['enhanced_features'][0]  # B, N, C
-    
-    # Visualize different aspects of enhanced features
-    n_tokens = enhanced.shape[0]
-    grid_size = int(np.sqrt(n_tokens))
-    
-    # Channel-wise mean
-    enhanced_mean = enhanced.mean(dim=1).detach().cpu().numpy()
-    axes[1, 1].plot(enhanced_mean)
-    axes[1, 1].set_title('Enhanced Features\n(Channel-wise Mean)', fontsize=10, fontweight='bold')
-    axes[1, 1].set_xlabel('Token Index')
-    axes[1, 1].set_ylabel('Feature Value')
-    axes[1, 1].grid(True, alpha=0.3)
-    
-    # Feature statistics
-    feat_stats = {
-        'ResNet C2': resnet_feats[0][0].std().item(),
-        'ResNet C3': resnet_feats[1][0].std().item(),
-        'ResNet C4': resnet_feats[2][0].std().item(),
-        'ResNet C5': resnet_feats[3][0].std().item(),
-        'REM': rem_feat[0].std().item(),
-        'Enhanced': enhanced.std().item()
-    }
-    
-    axes[1, 2].bar(range(len(feat_stats)), list(feat_stats.values()))
-    axes[1, 2].set_xticks(range(len(feat_stats)))
-    axes[1, 2].set_xticklabels(list(feat_stats.keys()), rotation=45, ha='right')
-    axes[1, 2].set_title('Feature Std Dev by Stage', fontsize=10, fontweight='bold')
-    axes[1, 2].set_ylabel('Std Deviation')
-    axes[1, 2].grid(True, alpha=0.3, axis='y')
-    
-    # Feature dimensionality info
-    info_text = f"""Feature Extraction Summary:
-    
-ResNet Stages:
-  C2: {resnet_feats[0].shape[1]} channels, {resnet_feats[0].shape[2]}×{resnet_feats[0].shape[3]}
-  C3: {resnet_feats[1].shape[1]} channels, {resnet_feats[1].shape[2]}×{resnet_feats[1].shape[3]}
-  C4: {resnet_feats[2].shape[1]} channels, {resnet_feats[2].shape[2]}×{resnet_feats[2].shape[3]}
-  C5: {resnet_feats[3].shape[1]} channels, {resnet_feats[3].shape[2]}×{resnet_feats[3].shape[3]}
+        return image_tensor, {
+            'image_id': img_id,
+            'file_name': img_filename,
+            'original_size': (original_width, original_height),
+            'gt_bboxes': gt_bboxes,
+            'gt_polygons': gt_polygons # Keep as list of lists for drawing
+        }
 
-REM Output:
-  {rem_feat.shape[1]} channels, {rem_feat.shape[2]}×{rem_feat.shape[3]}
-
-Transformer Enhanced:
-  {enhanced.shape[0]} tokens, {enhanced.shape[1]} dimensions
-    
-Total Parameters: {sum(p.numel() for p in features_dict['model'].parameters())/1e6:.2f}M
-"""
-    
-    axes[1, 3].text(0.1, 0.5, info_text, fontsize=9, family='monospace',
-                    verticalalignment='center', transform=axes[1, 3].transAxes)
-    axes[1, 3].axis('off')
-    
-    # Bottom row: Feature flow diagram
-    axes[2, 0].axis('off')
-    axes[2, 1].text(0.5, 0.5, 
-                    'Feature Extraction Pipeline:\n\n'
-                    'Input Image\n   ↓\n'
-                    'ResNet50 Backbone\n   ↓\n'
-                    'Multi-scale Features (C2, C3, C4, C5)\n   ↓\n'
-                    'REM (Receptive Enhancement)\n   ↓\n'
-                    'Transformer Encoder\n   ↓\n'
-                    'Enhanced Features',
-                    ha='center', va='center', fontsize=11,
-                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
-                    transform=axes[2, 1].transAxes)
-    axes[2, 1].axis('off')
-    
-    axes[2, 2].axis('off')
-    axes[2, 3].axis('off')
-    
-    plt.tight_layout()
-    return fig
-
-def demo_feature_extraction(image_dir, json_path, use_pretrained=False, device='cpu'):
+# --- Visualization Function ---
+def visualize_output(original_image_path, model_output, gt_info, show_gt=True, show_preds=True, score_threshold=0.5):
     """
-    Main demo function for Feature Extraction Module
+    Visualizes the original image with ground truth and predicted bounding boxes/polygons.
     
     Args:
-        image_dir: Directory containing images
-        json_path: Path to JSON file
-        use_pretrained: Whether to use pretrained ResNet weights (requires download)
-        device: 'cuda' or 'cpu'
+        original_image_path (str): Path to the original image file.
+        model_output (dict): Output from VimTSModule1.
+        gt_info (dict): Ground truth information from the dataset.
+        show_gt (bool): Whether to show ground truth annotations.
+        show_preds (bool): Whether to show predicted coarse bounding boxes.
+        score_threshold (float): Minimum score for predicted bounding boxes to be shown.
     """
-    print("="*70)
-    print("VimTS Feature Extraction Module Demo")
-    print("="*70)
+    image = Image.open(original_image_path).convert('RGB')
+    draw = ImageDraw.Draw(image)
     
-    # Check device
-    if device == 'cuda' and torch.cuda.is_available():
-        device = torch.device('cuda')
-        print(f"✓ Using GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        device = torch.device('cpu')
-        print("✓ Using CPU (this may be slow)")
-    
-    # Load dataset
-    print("\n[1/5] Loading dataset...")
-    dataset = load_dataset_info(json_path)
-    print(f"✓ Loaded dataset with {len(dataset['images'])} images")
-    
-    # Select an image from the dataset
-    sample_img_info = dataset['images'][0]
-    image_filename = sample_img_info['file_name']
-    image_id = sample_img_info['id']
-    
-    # Construct full image path from directory + filename
-    if image_dir is not None:
-        image_path = str(Path(image_dir) / image_filename)
-    else:
-        image_path = image_filename
-    
-    print(f"✓ Using sample image: {image_filename} ({sample_img_info['width']}×{sample_img_info['height']})")
-    print(f"  Full path: {image_path}")
-    
-    # Load image
-    print("\n[2/5] Loading image...")
-    try:
-        img = Image.open(image_path).convert('RGB')
-        print(f"✓ Image loaded: {img.size[0]}×{img.size[1]}")
-    except Exception as e:
-        print(f"  ⚠ Image file not found ({e}), creating dummy image...")
-        img = Image.new('RGB', (512, 512), color=(100, 150, 200))
-        draw = ImageDraw.Draw(img)
-        draw.text((256, 256), "Sample Text", fill=(255, 255, 255))
-        print(f"✓ Dummy image created: {img.size[0]}×{img.size[1]}")
-    
-    # Preprocess image
-    print("\n[3/5] Preprocessing image...")
-    img_tensor = torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
-    # Resize to smaller size for faster processing
-    img_tensor = F.interpolate(img_tensor.unsqueeze(0), size=(256, 256), mode='bilinear')
-    
-    # Normalize (ImageNet stats)
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-    img_tensor = (img_tensor - mean) / std
-    img_tensor = img_tensor.to(device)
-    print(f"✓ Preprocessed to shape: {img_tensor.shape}")
-    
-    # Build model
-    print("\n[4/5] Building Feature Extraction Module...")
-    if use_pretrained:
-        print("  ⚠ Downloading pretrained weights (this may take a while)...")
-    model = FeatureExtractionModule(pretrained=use_pretrained)
-    model = model.to(device)
-    model.eval()
-    
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"✓ Model built successfully ({total_params/1e6:.2f}M parameters)")
-    
-    # Forward pass
-    print("\n[5/5] Extracting features...")
-    print("  Processing ResNet backbone...")
-    with torch.no_grad():
-        features = model(img_tensor)
-    
-    # Move features back to CPU for visualization
-    features['resnet_features'] = [f.cpu() for f in features['resnet_features']]
-    features['rem_features'] = features['rem_features'].cpu()
-    features['enhanced_features'] = features['enhanced_features'].cpu()
-    features['model'] = model
-    
-    print("✓ Feature extraction complete!")
-    
-    print("\n" + "="*70)
-    print("Feature Extraction Complete!")
-    print("="*70)
-    
-    # Print results
-    print("\nExtracted Features:")
-    print(f"  • ResNet stages: {len(features['resnet_features'])} feature maps")
-    for i, feat in enumerate(features['resnet_features']):
-        print(f"    - C{i+2}: {feat.shape}")
-    
-    print(f"\n  • REM output: {features['rem_features'].shape}")
-    print(f"  • Enhanced features: {features['enhanced_features'].shape}")
-    print(f"    ({features['enhanced_features'].shape[1]} tokens, {features['enhanced_features'].shape[2]} dims)")
-    
-    print("\n" + "="*70)
-    print("Generating visualization...")
-    print("="*70 + "\n")
-    
-    # Visualize
-    fig = visualize_feature_maps(features, img, image_id)
-    plt.savefig('feature_extraction_demo.png', dpi=150, bbox_inches='tight')
-    print("✓ Visualization saved as 'feature_extraction_demo.png'")
-    plt.show()
-    
-    return features, model
+    img_width, img_height = image.size
 
+    plt.figure(figsize=(10, 10))
+    plt.imshow(image)
+    ax = plt.gca()
+
+    # --- Draw Ground Truth ---
+    if show_gt:
+        # GT BBoxes
+        for bbox_coords in gt_info['gt_bboxes']:
+            # bbox_coords are [x_min, y_min, width, height]
+            x_min, y_min, width, height = bbox_coords.tolist()
+            rect = patches.Rectangle((x_min, y_min), width, height, 
+                                     linewidth=1, edgecolor='g', facecolor='none', linestyle='--')
+            ax.add_patch(rect)
+        
+        # GT Polygons (more accurate for arbitrarily-shaped text)
+        for poly_coords_list in gt_info['gt_polygons']:
+            # poly_coords_list is [x1, y1, x2, y2, ..., xN, yN]
+            poly = [(poly_coords_list[i], poly_coords_list[i+1]) for i in range(0, len(poly_coords_list), 2)]
+            if len(poly) > 0:
+                # Pillow's draw.polygon is good for filled, but we want outline
+                # Matplotlib's Polygon patch is better for outlines
+                polygon_patch = patches.Polygon(poly, closed=True, linewidth=2, edgecolor='b', facecolor='none')
+                ax.add_patch(polygon_patch)
+        
+        plt.text(5, 5, "Green dashed: GT BBox", color='g', fontsize=8, bbox=dict(facecolor='white', alpha=0.5))
+        plt.text(5, 20, "Blue: GT Polygon", color='b', fontsize=8, bbox=dict(facecolor='white', alpha=0.5))
+
+    # --- Draw Predictions ---
+    if show_preds:
+        # Predicted coarse_bboxes_and_scores are (B, num_queries, 5)
+        # where last dim is (cx, cy, w, h, obj_score) normalized [0,1]
+        
+        # Take the first image in the batch for visualization
+        pred_bboxes = model_output['coarse_bboxes_and_scores'][0]
+        
+        for bbox_data in pred_bboxes:
+            cx_norm, cy_norm, w_norm, h_norm, score = bbox_data.tolist()
+            
+            if score >= score_threshold:
+                # Convert normalized (cx, cy, w, h) to pixel (x_min, y_min, width, height)
+                x_min = (cx_norm - w_norm / 2) * img_width
+                y_min = (cy_norm - h_norm / 2) * img_height
+                width = w_norm * img_width
+                height = h_norm * img_height
+
+                rect = patches.Rectangle((x_min, y_min), width, height,
+                                         linewidth=1, edgecolor='r', facecolor='none', linestyle='-')
+                ax.add_patch(rect)
+                plt.text(x_min, y_min - 5, f'{score:.2f}', color='r', fontsize=7, bbox=dict(facecolor='white', alpha=0.5))
+        
+        plt.text(5, 35, f"Red: Predicted Coarse BBox (score > {score_threshold})", color='r', fontsize=8, bbox=dict(facecolor='white', alpha=0.5))
+
+    plt.axis('off')
+    plt.title(f"Image: {gt_info['file_name']}")
+    plt.show()
+
+
+# --- Example Usage ---
 if __name__ == "__main__":
-    # Run the demo
-    # Pass the directory containing images and the JSON file path
+    # --- Configuration ---
+    # Adjust these paths to your setup
+    JSON_PATH = 'train.json'
+    IMAGE_DIR = './images' # Directory where your 0000000.jpg, 0000001.jpg etc. are located
+
+    # Model parameters (example values, tune based on actual implementation/paper)
+    FEATURE_DIM = 1024 # Output channels of ResNet50 layer3 and REM
+    NUM_QUERIES = 100  # Number of initial queries the model uses
     
-    # Check if GPU is available
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # Preprocessing transform for input images
+    # Resize to a fixed size for the model input, then normalize
+    # Keep aspect ratio is often done, but for simplicity here we just resize.
+    transform = transforms.Compose([
+        transforms.Resize((512, 512)), # Example fixed size for model input
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    # --- Data Loading ---
+    dataset = TotalTextDataset(json_path=JSON_PATH, img_dir=IMAGE_DIR, transform=transform)
     
-    features, model = demo_feature_extraction(
-        image_dir=r'/content/drive/MyDrive/sample/img',  # Directory containing images
-        json_path=r'/content/drive/MyDrive/sample/train.json',  # JSON file with image metadata
-        use_pretrained=False,  # Set to True to use pretrained weights (slower first run)
-        device=device  # Auto-detect GPU/CPU
+    # Pick a random image from the dataset to visualize
+    sample_idx = random.randint(0, len(dataset) - 1)
+    # sample_idx = 0 # Or pick a specific image_id if you want
+
+    image_tensor, gt_info = dataset[sample_idx]
+    
+    # Ensure image_tensor is a batch for the model
+    image_tensor = image_tensor.unsqueeze(0) # Add batch dimension: (C, H, W) -> (1, C, H, W)
+
+    # --- Initialize Module 1 ---
+    # Set pretrained=True for real usage to leverage ImageNet weights
+    model_m1 = VimTSModule1(
+        resnet_pretrained=False, # Set to True for real usage
+        rem_in_channels=1024,
+        rem_out_channels=FEATURE_DIM,
+        transformer_feature_dim=FEATURE_DIM,
+        transformer_num_heads=8,
+        transformer_num_layers=3,
+        num_queries=NUM_QUERIES
     )
+    # Set model to evaluation mode (important for BatchNorm/Dropout)
+    model_m1.eval()
+
+    # --- Forward Pass ---
+    with torch.no_grad(): # No gradient calculation needed for inference/visualization
+        output_m1 = model_m1(image_tensor)
+
+    print("--- Output of Conceptual Module 1 ---")
+    print(f"Encoded Image Features shape: {output_m1['encoded_image_features'].shape}")
+    print(f"Detection Queries shape: {output_m1['detection_queries'].shape}")
+    print(f"Recognition Queries shape: {output_m1['recognition_queries'].shape}")
+    print(f"Coarse BBoxes and Scores shape (cx,cy,w,h,obj_score): {output_m1['coarse_bboxes_and_scores'].shape}")
+
+    # --- Visualization ---
+    original_image_filename = gt_info['file_name']
+    original_image_full_path = os.path.join(IMAGE_DIR, original_image_filename)
     
-    print("\n" + "="*70)
-    print("Demo completed successfully!")
-    print("="*70)
+    print(f"\nVisualizing output for image: {original_image_filename}")
+    visualize_output(original_image_full_path, output_m1, gt_info, 
+                     show_gt=True, show_preds=True, score_threshold=0.5)
+
+    print("done!!")
+    # print("\n--- Additional Notes ---")
+    # print("1. 'Encoded Image Features' and 'Detection/Recognition Queries' are high-dimensional tensors.")
+    # print("   Their direct visual interpretation is limited without further processing (e.g., dimensionality reduction for features, or using queries in a decoder).")
+    # print("2. 'Coarse BBoxes and Scores' are the most directly interpretable output of Module 1 for visualization.")
+    # print("3. For actual training, you would pass 'encoded_image_features', 'detection_queries', 'recognition_queries' ")
+    # print("   to the subsequent Transformer Decoder and other heads, along with your 'gt_bboxes' and 'gt_polygons' ")
+    # print("   for loss calculation (e.g., using Hungarian matching as mentioned in the paper).")
+    # print("4. The `rec` field in your JSON would be tokenized and used as ground truth for a text recognition head.")
+    # print("5. To get accurate performance, you must use the full VimTS architecture, proper training procedures,")
+    # print("   and potentially a pre-trained ResNet50 (`resnet_pretrained=True`).")
