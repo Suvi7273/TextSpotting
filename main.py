@@ -409,7 +409,7 @@ if __name__ == "__main__":
     
     print(f"\nVisualizing output for image: {original_image_filename}")
     visualize_output(original_image_full_path, output_m1, gt_info, 
-                     show_gt=True, show_preds=True, score_threshold=0.01)
+                     show_gt=True, show_preds=True, score_threshold=0.0)
     
     print("done!!")
     
