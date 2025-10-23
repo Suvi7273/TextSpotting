@@ -262,8 +262,8 @@ def visualize_output(original_image_path, model_output, gt_info, show_gt=True, s
 # --- Example Usage / Training Loop ---
 if __name__ == "__main__":
     # --- Configuration ---
-    JSON_PATH = '/content/drive/MyDrive/sample/train.json'
-    IMAGE_DIR = '/content/drive/MyDrive/sample/img'
+    JSON_PATH = '/content/sample/train.json'
+    IMAGE_DIR = '/content/sample/img'
     
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
