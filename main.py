@@ -335,7 +335,7 @@ def visualize_output(original_image_path, model_output, gt_info, show_gt=True, s
 
     plt.axis('off')
     plt.title(f"Image: {gt_info['file_name']}")
-    plt.show()
+    #plt.show()
 
 
 # --- Example Usage ---
@@ -403,6 +403,7 @@ if __name__ == "__main__":
                      show_gt=True, show_preds=True, score_threshold=0.5)
 
     print("done!!")
+    plt.show()
     # print("\n--- Additional Notes ---")
     # print("1. 'Encoded Image Features' and 'Detection/Recognition Queries' are high-dimensional tensors.")
     # print("   Their direct visual interpretation is limited without further processing (e.g., dimensionality reduction for features, or using queries in a decoder).")
