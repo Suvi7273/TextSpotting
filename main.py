@@ -365,6 +365,11 @@ if __name__ == "__main__":
     # sample_idx = 0 # Or pick a specific image_id if you want
 
     image_tensor, gt_info = dataset[sample_idx]
+
+    if image_tensor.dim() == 3: # Check if it's 3D, if so, add batch dim
+        image_tensor = image_tensor.unsqueeze(0)
+    
+    print(f"Shape of image_tensor before model_m1: {image_tensor.shape}") # Debug print
     
     print(f"GT BBoxes for image {gt_info['file_name']}: {gt_info['gt_bboxes'].shape}")
     print(f"GT Polygons for image {gt_info['file_name']}: {len(gt_info['gt_polygons'])} instances")
@@ -404,7 +409,7 @@ if __name__ == "__main__":
     
     print(f"\nVisualizing output for image: {original_image_filename}")
     visualize_output(original_image_full_path, output_m1, gt_info, 
-                     show_gt=True, show_preds=True, score_threshold=0.5)
+                     show_gt=True, show_preds=True, score_threshold=0.01)
     
     print("done!!")
     
