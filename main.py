@@ -403,7 +403,7 @@ if __name__ == "__main__":
                      show_gt=True, show_preds=True, score_threshold=0.5)
 
     print("done!!")
-    plt.show()
+    
     # print("\n--- Additional Notes ---")
     # print("1. 'Encoded Image Features' and 'Detection/Recognition Queries' are high-dimensional tensors.")
     # print("   Their direct visual interpretation is limited without further processing (e.g., dimensionality reduction for features, or using queries in a decoder).")
@@ -414,3 +414,4 @@ if __name__ == "__main__":
     # print("4. The `rec` field in your JSON would be tokenized and used as ground truth for a text recognition head.")
     # print("5. To get accurate performance, you must use the full VimTS architecture, proper training procedures,")
     # print("   and potentially a pre-trained ResNet50 (`resnet_pretrained=True`).")
+    plt.show()
