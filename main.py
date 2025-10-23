@@ -409,18 +409,13 @@ if __name__ == "__main__":
     
     print(f"\nVisualizing output for image: {original_image_filename}")
     visualize_output(original_image_full_path, output_m1, gt_info, 
-                     show_gt=True, show_preds=True, score_threshold=0.0)
+                     show_gt=True, show_preds=True, score_threshold=0.01) # Keep low threshold
+
+    # Add this line to save the figure
+    output_filename = f"visualization_{gt_info['file_name']}.png"
+    plt.savefig(output_filename) 
+    print(f"Saved visualization to {output_filename}") # Confirm save location
     
     print("done!!")
     
-    # print("\n--- Additional Notes ---")
-    # print("1. 'Encoded Image Features' and 'Detection/Recognition Queries' are high-dimensional tensors.")
-    # print("   Their direct visual interpretation is limited without further processing (e.g., dimensionality reduction for features, or using queries in a decoder).")
-    # print("2. 'Coarse BBoxes and Scores' are the most directly interpretable output of Module 1 for visualization.")
-    # print("3. For actual training, you would pass 'encoded_image_features', 'detection_queries', 'recognition_queries' ")
-    # print("   to the subsequent Transformer Decoder and other heads, along with your 'gt_bboxes' and 'gt_polygons' ")
-    # print("   for loss calculation (e.g., using Hungarian matching as mentioned in the paper).")
-    # print("4. The `rec` field in your JSON would be tokenized and used as ground truth for a text recognition head.")
-    # print("5. To get accurate performance, you must use the full VimTS architecture, proper training procedures,")
-    # print("   and potentially a pre-trained ResNet50 (`resnet_pretrained=True`).")
-    plt.show()
+    plt.show() # Keep this as the very last line
