@@ -277,6 +277,9 @@ def visualize_output(original_image_path, model_output, gt_info, show_gt=True, s
         score_threshold (float): Minimum score for predicted bounding boxes to be shown.
     """
     image = Image.open(original_image_path).convert('RGB')
+    if not image:
+        print(f"Failed to load image at {original_image_path}")
+        return
     draw = ImageDraw.Draw(image)
     
     img_width, img_height = image.size
