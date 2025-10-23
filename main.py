@@ -409,7 +409,7 @@ if __name__ == "__main__":
     
     print(f"\nVisualizing output for image: {original_image_filename}")
     visualize_output(original_image_full_path, output_m1, gt_info, 
-                     show_gt=True, show_preds=True, score_threshold=0.01) # Keep low threshold
+                     show_gt=True, show_preds=True, score_threshold=0.5) # Keep low threshold
 
     # Add this line to save the figure
     output_filename = f"visualization_{gt_info['file_name']}.png"
