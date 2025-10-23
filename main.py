@@ -179,8 +179,6 @@ def visualize_output(original_image_path, model_output, gt_info, vocab_map=None,
 
 # --- Example Usage / Training Loop ---
 if __name__ == "__main__":
-    %matplotlib inline # Ensure this is at the very top of your Colab cell
-    
     # --- Configuration ---
     JSON_PATH = '/content/sample/train.json'
     IMAGE_DIR = '/content/sample/img'
