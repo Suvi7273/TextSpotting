@@ -86,7 +86,7 @@ class VimTSFullModel(nn.Module):
         return final_predictions
 
 # --- Visualization Function (updated to use new pred_logits format) ---
-def visualize_output(original_image_path, model_output, gt_info, vocab_map=None, show_gt=True, show_preds=True, score_threshold=0.5):
+def visualize_output(original_image_path, model_output, gt_info, vocab_map=None, padding_idx=None, show_gt=True, show_preds=True, score_threshold=0.5):
     image = Image.open(original_image_path).convert('RGB')
     
     img_width, img_height = image.size
@@ -160,8 +160,8 @@ def visualize_output(original_image_path, model_output, gt_info, vocab_map=None,
                     rec_logits_per_query = final_pred_rec_logits[i] # (max_seq_len, vocab_size)
                     predicted_char_ids = rec_logits_per_query.argmax(dim=-1).tolist()
                     for char_id in predicted_char_ids:
-                        if char_id == vocab_map['<pad>']: # Assuming '<pad>' is the padding char
-                            break # Stop at padding
+                        if char_id == padding_idx: # Use the passed padding_idx
+                            break
                         predicted_text += vocab_map.get(char_id, '?') # Map ID to char
                 
                 text_label = f'{score:.2f}'
@@ -352,7 +352,7 @@ if __name__ == "__main__":
     
     print(f"\nVisualizing final output for image: {gt_info_viz['file_name']}")
     visualize_output(original_image_full_path, output_viz, gt_info_viz, 
-                     vocab_map=id_to_char, # Pass vocab map for recognition text
+                     vocab_map=id_to_char, padding_idx=PADDING_IDX, # Pass vocab map for recognition text
                      show_gt=True, show_preds=True, score_threshold=0.01)
 
     # --- Save the output image ---
