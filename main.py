@@ -342,8 +342,8 @@ def visualize_output(original_image_path, model_output, gt_info, show_gt=True, s
 if __name__ == "__main__":
     # --- Configuration ---
     # Adjust these paths to your setup
-    JSON_PATH = 'train.json'
-    IMAGE_DIR = './images' # Directory where your 0000000.jpg, 0000001.jpg etc. are located
+    JSON_PATH = '/content/drive/myDrive/sample/train.json'
+    IMAGE_DIR = '/content/drive/myDrive/sample/img' # Directory where your 0000000.jpg, 0000001.jpg etc. are located
 
     # Model parameters (example values, tune based on actual implementation/paper)
     FEATURE_DIM = 1024 # Output channels of ResNet50 layer3 and REM
