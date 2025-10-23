@@ -99,13 +99,12 @@ class SetCriterion(nn.Module):
         targets dicts must contain the key "labels".
         """
         assert 'pred_logits' in outputs
-        src_logits = outputs['pred_logits'] # (B, N_queries, num_total_classes)
+        src_logits = outputs['pred_logits'] # This is on CUDA
 
-        idx = self._get_src_permutation_idx(indices) # (B_matched_idx, N_matched_idx)
+        idx = self._get_src_permutation_idx(indices)
         
-        # Create target labels for all queries: initially all 'no_object'
         target_labels = torch.full(src_logits.shape[:2], self.background_class_idx,
-                                   dtype=torch.int64, device=src_logits.device)
+                                   dtype=torch.int64, device=src_logits.device) # <--- ENSURE device argument is present
         
         # Assign foreground label (class 0 'text') to matched predictions
         target_labels[idx] = 0 # As per our TotalTextDataset, 'text' is class 0
@@ -156,10 +155,13 @@ class SetCriterion(nn.Module):
         assert 'pred_bboxes' in outputs
         idx = self._get_src_permutation_idx(indices) # (batch_idx, src_idx)
 
-        src_boxes = outputs['pred_bboxes'][idx] # Matched predicted boxes (N_matched, 4)
-        target_boxes = targets[0]['boxes'][indices[0][1]] # Matched ground truth boxes (N_matched, 4)
+        src_boxes = outputs['pred_bboxes'][idx] # This is on CUDA
+        target_boxes = targets[0]['boxes'][indices[0][1]] # This is on CPU
 
-        if src_boxes.numel() == 0: # No matches
+        # Move target_boxes to CUDA
+        target_boxes = target_boxes.to(src_boxes.device) # <--- ADD THIS LINE HERE
+
+        if src_boxes.numel() == 0:
             return {'loss_bbox': torch.tensor(0.0, device=outputs['pred_bboxes'].device),
                     'loss_giou': torch.tensor(0.0, device=outputs['pred_bboxes'].device)}
 
@@ -180,21 +182,22 @@ class SetCriterion(nn.Module):
         """
         assert 'pred_polygons' in outputs
         idx = self._get_src_permutation_idx(indices)
-        src_polygons = outputs['pred_polygons'][idx] # Matched predicted polygons (N_matched, 2*num_points)
-        target_polygons_list = [targets[0]['polygons'][i] for i in indices[0][1]] # Matched GT polygons (list of tensors)
+        src_polygons = outputs['pred_polygons'][idx] # This is on CUDA
+        target_polygons_list = [targets[0]['polygons'][i] for i in indices[0][1]] # These are on CPU
 
         if src_polygons.numel() == 0 or len(target_polygons_list) == 0:
             return {'loss_polygon': torch.tensor(0.0, device=outputs['pred_polygons'].device)}
         
-        # Pad target_polygons to match `pred_polygons` shape (2*num_polygon_points)
         padded_target_polygons = []
         for poly_tensor in target_polygons_list:
+            # Move poly_tensor to the same device as src_polygons BEFORE padding/stacking
+            poly_tensor = poly_tensor.to(src_polygons.device) # <--- ADD THIS LINE HERE
             if poly_tensor.shape[0] > src_polygons.shape[1]:
                 poly_tensor = poly_tensor[:src_polygons.shape[1]]
             padded_poly = F.pad(poly_tensor, (0, src_polygons.shape[1] - poly_tensor.shape[0]), value=0.0)
             padded_target_polygons.append(padded_poly)
         
-        target_polygons_tensor = torch.stack(padded_target_polygons) # (N_matched, 2*num_points)
+        target_polygons_tensor = torch.stack(padded_target_polygons) # This tensor will now be on CUDA
         
         loss_polygon = F.l1_loss(src_polygons, target_polygons_tensor, reduction='none')
         losses = {'loss_polygon': loss_polygon.sum() / src_polygons.shape[0]}
