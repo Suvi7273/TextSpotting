@@ -265,7 +265,6 @@ class TotalTextDataset(torch.utils.data.Dataset):
 
 # --- Visualization Function ---
 def visualize_output(original_image_path, model_output, gt_info, show_gt=True, show_preds=True, score_threshold=0.5):
-    %matplotlib inline
     """
     Visualizes the original image with ground truth and predicted bounding boxes/polygons.
     
@@ -400,7 +399,9 @@ if __name__ == "__main__":
     high_score_preds = [b for b in pred_bboxes_raw if b[4] >= 0.5] # b[4] is the score
     print(f"Number of predicted bboxes with score >= 0.5: {len(high_score_preds)}")
 
-
+    original_image_filename = gt_info['file_name']
+    original_image_full_path = os.path.join(IMAGE_DIR, original_image_filename)
+    
     print(f"\nVisualizing output for image: {original_image_filename}")
     visualize_output(original_image_full_path, output_m1, gt_info, 
                      show_gt=True, show_preds=True, score_threshold=0.5)
