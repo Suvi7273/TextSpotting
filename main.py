@@ -205,21 +205,6 @@ if __name__ == "__main__":
     NUM_HEADS = 8
     NUM_FOREGROUND_CLASSES = 1 # 'text' class
     
-    # Vocab size and padding for recognition
-    # Based on your JSON 'rec' field having values like 84, 72, 69, 96:
-    # It seems 96 is padding. Other numbers are character IDs.
-    # Let's create a dummy mapping for common ASCII characters and padding.
-    # We need to ensure the highest character ID + 1 is VOCAB_SIZE.
-    # Max value in your sample is 96, so VOCAB_SIZE = 97 is correct.
-    
-    id_to_char = {i: chr(i + 32) for i in range(95)} # Example: map 0 to ' ', 1 to '!', etc. up to 94 to '~'
-    id_to_char[95] = '<unk>' # Unknown character
-    id_to_char[96] = '<pad>' # Padding character
-    char_to_id = {v: k for k, v in id_to_char.items()}
-    
-    VOCAB_SIZE = len(id_to_char) # 97
-    PADDING_IDX = char_to_id['<pad>'] # 96
-
     MAX_RECOGNITION_SEQ_LEN = 25 
     NUM_POLYGON_POINTS = 16 
     
@@ -242,7 +227,8 @@ if __name__ == "__main__":
 
     dataset = TotalTextDataset(json_path=JSON_PATH, img_dir=IMAGE_DIR, transform=transform_train, 
                                max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN,
-                               padding_value=PADDING_IDX)
+                               padding_value=PADDING_IDX,check_recognition_quality=True)
+    
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, collate_fn=collate_fn)
     
     USE_ADAPTER = True  # Set to True for adapter-based fine-tuning
