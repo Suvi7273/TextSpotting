@@ -186,8 +186,8 @@ def visualize_output(original_image_path, model_output, gt_info, vocab_map=None,
 # --- Example Usage / Training Loop ---
 if __name__ == "__main__":
     # --- Configuration ---
-    JSON_PATH = '/content/sample/train.json'
-    IMAGE_DIR = '/content/sample/img'
+    JSON_PATH = '/content/drive/MyDrive/dataset_ts/mlt2017_sample/train.json'
+    IMAGE_DIR = '/content/drive/MyDrive/dataset_ts/mlt2017_sample/img'
     
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
