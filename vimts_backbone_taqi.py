@@ -62,14 +62,24 @@ class PositionalEncoding2D(nn.Module):
                             -(math.log(10000.0) / d_model_half))
         
         # Height encoding
-        pos_h = torch.arange(0., max_h).unsqueeze(1)
-        pe[0:d_model_half:2, :, :] = torch.sin(pos_h * div_term).unsqueeze(2).repeat(1, 1, max_w)
-        pe[1:d_model_half:2, :, :] = torch.cos(pos_h * div_term).unsqueeze(2).repeat(1, 1, max_w)
+        pos_h = torch.arange(0., max_h).unsqueeze(1)  # (max_h, 1)
+        sin_h = torch.sin(pos_h * div_term)  # (max_h, d_model_half//2)
+        cos_h = torch.cos(pos_h * div_term)  # (max_h, d_model_half//2)
+        
+        # Assign height encodings
+        for i in range(sin_h.shape[1]):
+            pe[2*i, :, :] = sin_h[:, i].unsqueeze(1).repeat(1, max_w)
+            pe[2*i + 1, :, :] = cos_h[:, i].unsqueeze(1).repeat(1, max_w)
         
         # Width encoding
-        pos_w = torch.arange(0., max_w).unsqueeze(1)
-        pe[d_model_half::2, :, :] = torch.sin(pos_w * div_term).unsqueeze(1).repeat(1, max_h, 1)
-        pe[d_model_half+1::2, :, :] = torch.cos(pos_w * div_term).unsqueeze(1).repeat(1, max_h, 1)
+        pos_w = torch.arange(0., max_w).unsqueeze(1)  # (max_w, 1)
+        sin_w = torch.sin(pos_w * div_term)  # (max_w, d_model_half//2)
+        cos_w = torch.cos(pos_w * div_term)  # (max_w, d_model_half//2)
+        
+        # Assign width encodings
+        for i in range(sin_w.shape[1]):
+            pe[d_model_half + 2*i, :, :] = sin_w[:, i].unsqueeze(0).repeat(max_h, 1)
+            pe[d_model_half + 2*i + 1, :, :] = cos_w[:, i].unsqueeze(0).repeat(max_h, 1)
         
         pe = pe.permute(1, 2, 0)  # (max_h, max_w, d_model)
         self.register_buffer('pe', pe)
