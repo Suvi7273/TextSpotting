@@ -1,5 +1,3 @@
-# main.py
-
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
@@ -17,9 +15,9 @@ import torch.nn.functional as F
 # Import modules from the separate files
 from vimts_backbone_taqi import VimTSModule1
 from vimts_decoder_heads import TaskAwareDecoder, TaskAwareDecoderLayer, PredictionHeads
-from text_spotting_dataset import TotalTextDataset, collate_fn # Use the new collate_fn
-from matcher import HungarianMatcher, box_cxcywh_to_xyxy # Also bring box utility for visualization
-from detr_losses import SetCriterion # Import SetCriterion
+from text_spotting_dataset import TotalTextDataset, collate_fn ,build_vocabulary_from_json, AdaptiveResize, AdaptiveResizeTest  
+from matcher import HungarianMatcher, box_cxcywh_to_xyxy 
+from detr_losses import SetCriterion 
 
 
 # --- Full VimTS Model ---
@@ -32,7 +30,10 @@ class VimTSFullModel(nn.Module):
                  num_foreground_classes=1, # 1 for 'text'
                  vocab_size=97, # 0-95 for chars, 96 for padding
                  num_polygon_points=16,
-                 max_recognition_seq_len=25):
+                 max_recognition_seq_len=25,
+                 use_adapter=True,
+                 use_pqgm=False, 
+                 task_id=0):
         super().__init__()
         self.module1 = VimTSModule1(
             resnet_pretrained=resnet_pretrained,
@@ -40,7 +41,9 @@ class VimTSFullModel(nn.Module):
             transformer_feature_dim=transformer_feature_dim,
             transformer_num_heads=transformer_num_heads,
             transformer_num_layers=transformer_num_encoder_layers,
-            num_queries=num_queries
+            num_queries=num_queries,
+            use_pqgm=use_pqgm,
+            task_id=task_id
         )
 
         decoder_layer = TaskAwareDecoderLayer(
@@ -49,7 +52,9 @@ class VimTSFullModel(nn.Module):
         )
         self.decoder = TaskAwareDecoder(
             decoder_layer=decoder_layer,
-            num_layers=transformer_num_decoder_layers
+            num_layers=transformer_num_decoder_layers,
+            d_model=transformer_feature_dim,  
+            max_queries=num_queries * 2 
         )
 
         self.prediction_heads = PredictionHeads(
@@ -57,7 +62,8 @@ class VimTSFullModel(nn.Module):
             num_foreground_classes=num_foreground_classes,
             num_chars=vocab_size,
             num_polygon_points=num_polygon_points,
-            max_recognition_seq_len=max_recognition_seq_len
+            max_recognition_seq_len=max_recognition_seq_len,
+            use_adapter=use_adapter
         )
         self.num_queries = num_queries # Store for matching with targets (for training)
 
@@ -186,6 +192,10 @@ if __name__ == "__main__":
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    
+    # Build vocabulary from dataset
+    id_to_char, char_to_id, VOCAB_SIZE, PADDING_IDX = build_vocabulary_from_json(JSON_PATH)
+    print(f"Vocabulary size: {VOCAB_SIZE}, Padding index: {PADDING_IDX}")
 
     # Model parameters
     FEATURE_DIM = 1024
@@ -218,16 +228,27 @@ if __name__ == "__main__":
     LEARNING_RATE = 1e-4
     NUM_EPOCHS = 50 # Increase for more "learning" (even with random init)
 
-    transform = transforms.Compose([
-        transforms.Resize((512, 512)),
+    transform_train = transforms.Compose([
+        AdaptiveResize(min_size=640, max_size=896, max_long_side=1600),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    transform_test = transforms.Compose([
+        AdaptiveResizeTest(shorter_size=1000, max_long_side=1824),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    dataset = TotalTextDataset(json_path=JSON_PATH, img_dir=IMAGE_DIR, transform=transform, 
+    dataset = TotalTextDataset(json_path=JSON_PATH, img_dir=IMAGE_DIR, transform=transform_train, 
                                max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN,
                                padding_value=PADDING_IDX)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, collate_fn=collate_fn)
+    
+    USE_ADAPTER = True  # Set to True for adapter-based fine-tuning
+    FREEZE_BACKBONE = False  # Set to True for stage 2 (after pre-training)
+    USE_PQGM = False     # Start with False for initial training, True for multi-task
+    TASK_ID = 0          # 0=word-level, 1=line-level, 2=video-level
 
     # --- Initialize Full Model ---
     model = VimTSFullModel(
@@ -242,8 +263,26 @@ if __name__ == "__main__":
         num_foreground_classes=NUM_FOREGROUND_CLASSES,
         vocab_size=VOCAB_SIZE,
         num_polygon_points=NUM_POLYGON_POINTS,
-        max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN
+        max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN,
+        use_adapter=USE_ADAPTER,
+        use_pqgm=USE_PQGM, 
+        task_id=TASK_ID
     ).to(device)
+    
+    if FREEZE_BACKBONE:
+        print("Freezing backbone and encoder...")
+        for name, param in model.named_parameters():
+            if 'module1' in name and 'task_aware_query_init' not in name:
+                param.requires_grad = False
+            if 'decoder' in name and 'adapter' not in name:
+                param.requires_grad = False
+            if 'prediction_heads' in name and 'adapter' not in name:
+                param.requires_grad = False
+        
+        # Count trainable parameters
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Trainable parameters: {trainable_params}/{total_params} ({100*trainable_params/total_params:.2f}%)")
 
     # --- Initialize DETR Criterion and Matcher ---
     matcher = HungarianMatcher(
@@ -258,8 +297,12 @@ if __name__ == "__main__":
     
     # Weights for the different loss terms during backpropagation
     weight_dict = {
-        'loss_ce': 1, 'loss_bbox': 5, 'loss_giou': 2, 'loss_recognition': 2,
-        'loss_cardinality': 1, 'loss_polygon': 1 # Added polygon loss weight
+        'loss_ce': 2.0,         # λ_c = 2.0 (paper)
+        'loss_bbox': 5.0,       # λ_b = 5.0 (paper)
+        'loss_giou': 2.0,       # GIoU weight (paper)
+        'loss_recognition': 1.0, # α_r = 1.0 (paper)
+        'loss_cardinality': 1.0,
+        'loss_polygon': 1.0     # α_p = 1.0 (paper)
     }
     # Losses to compute, as strings
     losses_to_compute = ['labels', 'boxes', 'polygons', 'recognition', 'cardinality']
@@ -283,6 +326,20 @@ if __name__ == "__main__":
 
 
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    
+    # Learning rate scheduler (as per paper: reduce at 180k and 210k iterations)
+    # For shorter training, we'll use epochs instead
+    scheduler = optim.lr_scheduler.MultiStepLR(
+        optimizer, 
+        milestones=[int(NUM_EPOCHS*0.75), int(NUM_EPOCHS*0.875)],  # 75% and 87.5% of training
+        gamma=0.1
+    )
+    
+    # Gradient accumulation steps (to simulate larger batch size)
+    ACCUMULATION_STEPS = 4
+    
+    from torch.cuda.amp import autocast, GradScaler
+    scaler = GradScaler()
 
     print(f"Total parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
@@ -293,13 +350,27 @@ if __name__ == "__main__":
         criterion.train()
         total_epoch_loss = 0
         
+        optimizer.zero_grad()
+        
         for batch_idx, (images, targets) in enumerate(dataloader):
             images = images.to(device)
             # targets is a list of dictionaries (even for batch_size=1)
             # Move individual tensors within target dicts to device
             targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
-            optimizer.zero_grad()
+            with autocast():
+                predictions = model(images)
+                loss_dict = criterion(predictions, targets)
+                loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+                loss = loss / ACCUMULATION_STEPS  # Normalize loss
+            
+            scaler.scale(loss).backward()
+            if (batch_idx + 1) % ACCUMULATION_STEPS == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+            # scaler.step(optimizer)
+            # scaler.update()
             predictions = model(images)
 
             # --- Calculate Losses using SetCriterion ---
@@ -311,17 +382,38 @@ if __name__ == "__main__":
             loss.backward()
             optimizer.step()
             
-            total_epoch_loss += loss.item()
+            total_epoch_loss += loss.item() * ACCUMULATION_STEPS
 
             if (batch_idx + 1) % 5 == 0:
                 print(f"Epoch {epoch+1}/{NUM_EPOCHS}, Batch {batch_idx+1}/{len(dataloader)}, Total Loss: {loss.item():.4f}", end=' | ')
                 for k, v in loss_dict.items():
                     print(f"{k}: {v.item():.4f}", end=' ')
                 print()
+        scheduler.step()
 
         print(f"Epoch {epoch+1} finished, Average Total Loss: {total_epoch_loss / len(dataloader):.4f}")
 
     print("\nDETR-style training finished.")
+    
+    # Save model checkpoint
+    checkpoint_path = '/content/vimts_model_checkpoint.pth'
+    torch.save({
+        'epoch': NUM_EPOCHS,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'vocab': {'id_to_char': id_to_char, 'char_to_id': char_to_id, 
+                  'vocab_size': VOCAB_SIZE, 'padding_idx': PADDING_IDX},
+        'config': {
+            'feature_dim': FEATURE_DIM,
+            'num_queries': NUM_QUERIES,
+            'num_encoder_layers': NUM_ENCODER_LAYERS,
+            'num_decoder_layers': NUM_DECODER_LAYERS,
+            'use_adapter': USE_ADAPTER,
+            'use_pqgm': USE_PQGM,
+            'task_id': TASK_ID
+        }
+    }, checkpoint_path)
+    print(f"Model saved to {checkpoint_path}")
 
     # --- Inference and Visualization after training ---
     print("\nRunning inference and visualization on a random sample after training...")
