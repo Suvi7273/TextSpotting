@@ -330,21 +330,34 @@ if __name__ == "__main__":
     # IMPROVED: Adjust loss weights based on task importance
     weight_dict = {
         'loss_ce': 2.0,          # Classification
-        'loss_bbox': 5.0,        # Bounding box L1
-        'loss_giou': 2.0,        # GIoU
-        'loss_recognition': 3.0, # INCREASED: Recognition is important
-        'loss_cardinality': 1.0,
-        'loss_polygon': 1.0
+        'loss_bbox': 5.0,        # Bounding box L1 (part of 'boxes' loss)
+        'loss_giou': 2.0,        # GIoU (part of 'boxes' loss)
+        'loss_recognition': 3.0, # Recognition
+        'loss_cardinality': 1.0, # Cardinality
+        'loss_polygon': 1.0      # Polygon
     }
 
-    # Start without recognition loss if most data is placeholder
-    losses_to_compute = ['labels', 'boxes', 'cardinality', 'giou']
+    # IMPORTANT FIX: The loss names in losses_to_compute must match the methods in SetCriterion
+    # The SetCriterion has these loss methods:
+    #   - 'labels' -> computes loss_ce (classification)
+    #   - 'boxes' -> computes loss_bbox AND loss_giou
+    #   - 'cardinality' -> computes loss_cardinality
+    #   - 'polygons' -> computes loss_polygon
+    #   - 'recognition' -> computes loss_recognition
+
+    # CORRECT: Use the method names, not the individual loss component names
+    losses_to_compute = ['labels', 'boxes', 'cardinality', 'polygons']
+
     # Add recognition only if you have good quality data
     if len(dataset) > len(base_dataset) * 0.3:  # If >30% have meaningful text
         losses_to_compute.append('recognition')
         print("\nIncluding recognition loss in training")
     else:
         print("\nSkipping recognition loss due to insufficient text data")
+        # Remove recognition from weight_dict if not using it
+        weight_dict.pop('loss_recognition', None)
+
+    print(f"Losses to compute: {losses_to_compute}")
 
     eos_coef = 0.1
 
@@ -353,11 +366,14 @@ if __name__ == "__main__":
         matcher=matcher,
         weight_dict=weight_dict,
         eos_coef=eos_coef,
-        losses=losses_to_compute,
+        losses=losses_to_compute,  # Pass the correct loss method names
         vocab_size=VOCAB_SIZE,
         max_seq_len=MAX_RECOGNITION_SEQ_LEN,
         padding_idx=PADDING_IDX
     ).to(device)
+
+    print(f"\nCriterion initialized with losses: {losses_to_compute}")
+    print(f"Loss weights: {weight_dict}")
 
     optimizer = optim.AdamW(param_groups, lr=LEARNING_RATE, weight_decay=1e-4)
 
