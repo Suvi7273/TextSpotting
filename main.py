@@ -326,6 +326,9 @@ if __name__ == "__main__":
     
     from torch.cuda.amp import autocast, GradScaler
     scaler = GradScaler()
+    
+    # Add gradient clipping
+    MAX_GRAD_NORM = 0.1
 
     print(f"Total parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
@@ -347,34 +350,54 @@ if __name__ == "__main__":
             with autocast():
                 predictions = model(images)
                 loss_dict = criterion(predictions, targets)
+                
+                # Check if loss_dict contains any NaN or Inf
+                loss_values_valid = all(not (torch.isnan(v).any() or torch.isinf(v).any()) 
+                                       for v in loss_dict.values() if isinstance(v, torch.Tensor))
+                
+                if not loss_values_valid:
+                    print(f"Warning: Invalid loss values detected at epoch {epoch+1}, batch {batch_idx+1}")
+                    for k, v in loss_dict.items():
+                        if isinstance(v, torch.Tensor):
+                            print(f"  {k}: NaN={torch.isnan(v).any()}, Inf={torch.isinf(v).any()}")
+                    continue  # Skip this batch
+                
                 loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
                 loss = loss / ACCUMULATION_STEPS  # Normalize loss
             
+            # Check if loss is valid before backward
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"Warning: Invalid total loss at epoch {epoch+1}, batch {batch_idx+1}. Skipping.")
+                continue
+            
             scaler.scale(loss).backward()
+            
             if (batch_idx + 1) % ACCUMULATION_STEPS == 0:
+                # Unscale gradients and clip
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+                
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
-            # scaler.step(optimizer)
-            # scaler.update()
-            predictions = model(images)
-
-            # --- Calculate Losses using SetCriterion ---
-            loss_dict = criterion(predictions, targets)
-            
-            # Weighted sum of all losses
-            loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
-            
-            loss.backward()
-            optimizer.step()
             
             total_epoch_loss += loss.item() * ACCUMULATION_STEPS
 
             if (batch_idx + 1) % 5 == 0:
-                print(f"Epoch {epoch+1}/{NUM_EPOCHS}, Batch {batch_idx+1}/{len(dataloader)}, Total Loss: {loss.item():.4f}", end=' | ')
+                print(f"Epoch {epoch+1}/{NUM_EPOCHS}, Batch {batch_idx+1}/{len(dataloader)}, Total Loss: {loss.item() * ACCUMULATION_STEPS:.4f}", end=' | ')
                 for k, v in loss_dict.items():
-                    print(f"{k}: {v.item():.4f}", end=' ')
+                    if isinstance(v, torch.Tensor):
+                        print(f"{k}: {v.item():.4f}", end=' ')
                 print()
+        
+        # Step any remaining gradients
+        if (len(dataloader) % ACCUMULATION_STEPS) != 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+        
         scheduler.step()
 
         print(f"Epoch {epoch+1} finished, Average Total Loss: {total_epoch_loss / len(dataloader):.4f}")

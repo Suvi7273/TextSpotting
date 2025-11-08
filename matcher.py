@@ -1,4 +1,4 @@
-# matcher.py
+# matcher.py - Fixed version
 
 import torch
 from scipy.optimize import linear_sum_assignment
@@ -32,7 +32,7 @@ def box_iou(boxes1, boxes2):
 
     union = area1[:, None] + area2 - inter
 
-    iou = inter / union
+    iou = inter / (union + 1e-7)  # Add epsilon to avoid division by zero
     return iou, union
 
 def generalized_box_iou(boxes1, boxes2):
@@ -53,7 +53,7 @@ def generalized_box_iou(boxes1, boxes2):
     wh = (rb - lt).clamp(min=0)
     area = wh[:, :, 0] * wh[:, :, 1] # Area of the smallest enclosing box
 
-    return iou - (area - union) / area
+    return iou - (area - union) / (area + 1e-7)  # Add epsilon to avoid division by zero
 
 
 class HungarianMatcher(nn.Module):
@@ -113,50 +113,72 @@ class HungarianMatcher(nn.Module):
                      torch.empty(0, dtype=torch.int64, device=out_prob.device))]
 
         # Compute the classification cost.
-        # DETR typically uses 1 - P(target_class | pred_i) as cost.
-        # Here, `num_classes` in pred_logits is (num_foreground_classes + 1) = 2.
-        # Class 0 is 'text', Class 1 is 'no_object' (background).
-        # We want to match text targets to predictions of class 'text'.
         # Cost for class is 1 - P(class=0) where class 0 is 'text'.
         # So it's P(class=1) i.e. P(no_object).
         cost_class = out_prob[:, 1] # Probability of being 'no_object'
         cost_class = cost_class.unsqueeze(1).repeat(1, tgt_labels.shape[0]) # (num_queries, num_target_boxes)
 
-
         # Compute the L1 cost between boxes
         cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1) # (num_queries, num_target_boxes)
 
         # Compute the giou cost between boxes
-        # generalized_box_iou expects xyxy format, so convert out_bbox and tgt_bbox
         cost_giou = -generalized_box_iou(out_bbox, tgt_bbox) # Negative GIoU as cost to minimize
 
         # Compute Recognition Cost (Cross-Entropy loss for sequences)
-        # out_rec_logits: (num_queries, max_seq_len, vocab_size)
-        # tgt_rec_seq: (num_target_boxes, max_seq_len)
+        # Handle cases where recognition sequences are all padding
+        num_tgt = tgt_rec_seq.shape[0]
         
-        # Expand target_rec_seq for broadcasting across num_queries
-        # target_rec_expanded: (num_queries, num_target_boxes, max_seq_len)
-        target_rec_expanded = tgt_rec_seq.unsqueeze(0).repeat(num_queries, 1, 1)
-
-        # Reshape logits and targets for F.cross_entropy
-        # flat_out_rec_logits: (num_queries * num_target_boxes * max_seq_len, vocab_size)
-        flat_out_rec_logits = out_rec_logits.unsqueeze(1).repeat(1, tgt_rec_seq.shape[0], 1, 1).view(-1, self.vocab_size)
+        # Check if target sequences have any non-padding tokens
+        non_padding_mask = (tgt_rec_seq != self.padding_idx)  # (num_target_boxes, max_seq_len)
+        has_text = non_padding_mask.any(dim=1)  # (num_target_boxes,) - True if sequence has any non-padding token
         
-        # flat_target_rec: (num_queries * num_target_boxes * max_seq_len)
-        flat_target_rec = target_rec_expanded.view(-1)
-        
-        # Calculate CE loss per query-target pair, reduce by sum over sequence for cost
-        # `reduction='none'` to get loss per element, then sum for sequence loss.
-        # `ignore_index` is crucial for padding tokens.
-        cost_recognition = F.cross_entropy(flat_out_rec_logits, flat_target_rec, reduction='none', ignore_index=self.padding_idx)
-        
-        # Sum loss over Max_Seq_Len for each query-target pair
-        cost_recognition = cost_recognition.view(num_queries, tgt_rec_seq.shape[0], self.max_seq_len).sum(dim=-1)
-
+        if has_text.any():
+            # Compute recognition cost only for targets with actual text
+            # out_rec_logits: (num_queries, max_seq_len, vocab_size)
+            # tgt_rec_seq: (num_target_boxes, max_seq_len)
+            
+            # Expand for broadcasting
+            out_rec_logits_expanded = out_rec_logits.unsqueeze(1).expand(-1, num_tgt, -1, -1)  # (num_queries, num_tgt, max_seq_len, vocab_size)
+            tgt_rec_seq_expanded = tgt_rec_seq.unsqueeze(0).expand(num_queries, -1, -1)  # (num_queries, num_tgt, max_seq_len)
+            
+            # Reshape for cross entropy
+            flat_logits = out_rec_logits_expanded.reshape(-1, self.vocab_size)  # (num_queries * num_tgt * max_seq_len, vocab_size)
+            flat_targets = tgt_rec_seq_expanded.reshape(-1)  # (num_queries * num_tgt * max_seq_len)
+            
+            # Compute cross entropy loss
+            ce_loss = F.cross_entropy(flat_logits, flat_targets, reduction='none', ignore_index=self.padding_idx)
+            
+            # Reshape back to (num_queries, num_tgt, max_seq_len)
+            ce_loss = ce_loss.view(num_queries, num_tgt, self.max_seq_len)
+            
+            # Sum over sequence length to get cost per query-target pair
+            cost_recognition = ce_loss.sum(dim=-1)  # (num_queries, num_tgt)
+            
+            # For targets without text (all padding), set recognition cost to 0
+            cost_recognition[:, ~has_text] = 0.0
+            
+            # Normalize by the number of non-padding tokens to avoid bias towards shorter sequences
+            num_tokens_per_target = non_padding_mask.sum(dim=1).float().clamp(min=1.0)  # (num_tgt,)
+            cost_recognition = cost_recognition / num_tokens_per_target.unsqueeze(0)  # (num_queries, num_tgt)
+        else:
+            # All targets are padding-only, set recognition cost to 0
+            cost_recognition = torch.zeros(num_queries, num_tgt, device=out_prob.device)
 
         # Final cost matrix: C_ij = bbox_cost + class_cost + giou_cost + recognition_cost
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + \
             self.cost_giou * cost_giou + self.cost_recognition * cost_recognition
+        
+        # Check for invalid values before passing to Hungarian algorithm
+        if torch.isnan(C).any() or torch.isinf(C).any():
+            print(f"Warning: Cost matrix contains NaN or Inf values!")
+            print(f"  cost_bbox contains NaN: {torch.isnan(cost_bbox).any()}")
+            print(f"  cost_class contains NaN: {torch.isnan(cost_class).any()}")
+            print(f"  cost_giou contains NaN: {torch.isnan(cost_giou).any()}")
+            print(f"  cost_recognition contains NaN: {torch.isnan(cost_recognition).any()}")
+            
+            # Replace NaN and Inf with large finite values
+            C = torch.nan_to_num(C, nan=1e6, posinf=1e6, neginf=-1e6)
+        
         C = C.cpu() # Hungarian algorithm typically runs on CPU
 
         # Perform Hungarian matching

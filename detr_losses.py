@@ -215,6 +215,9 @@ class SetCriterion(nn.Module):
         if src_rec_logits.numel() == 0 or target_rec_seq.numel() == 0:
             return {'loss_recognition': torch.tensor(0.0, device=outputs['pred_chars_logits'].device)}
         
+        # Move target_rec_seq to same device as src_rec_logits if needed
+        target_rec_seq = target_rec_seq.to(src_rec_logits.device)
+        
         # Flatten for CrossEntropyLoss:
         # Inputs: (N, C) where N is total items, C is vocab_size
         # Targets: (N) where N is total items
@@ -230,6 +233,7 @@ class SetCriterion(nn.Module):
         if num_non_padding > 0:
             loss_rec = loss_rec.sum() / num_non_padding
         else:
+            # If all tokens are padding, return zero loss
             loss_rec = torch.tensor(0.0, device=outputs['pred_chars_logits'].device)
 
         losses = {'loss_recognition': loss_rec}
