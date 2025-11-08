@@ -15,7 +15,7 @@ import torch.nn.functional as F
 # Import modules from the separate files
 from vimts_backbone_taqi import VimTSModule1
 from vimts_decoder_heads import TaskAwareDecoder, TaskAwareDecoderLayer, PredictionHeads
-from text_spotting_dataset import TotalTextDataset, collate_fn ,build_vocabulary_from_json, AdaptiveResize, AdaptiveResizeTest  
+from text_spotting_dataset import TotalTextDataset, collate_fn ,build_vocabulary_from_json, AdaptiveResize, AdaptiveResizeTest, build_vocabulary_from_json_v2
 from matcher import HungarianMatcher, box_cxcywh_to_xyxy 
 from detr_losses import SetCriterion 
 
@@ -182,19 +182,23 @@ def visualize_output(original_image_path, model_output, gt_info, vocab_map=None,
     plt.title(f"Image: {gt_info['file_name']}")
     # plt.show() # Removed as per Colab fix
 
-
+import math
 # --- Example Usage / Training Loop ---
 if __name__ == "__main__":
     # --- Configuration ---
     JSON_PATH = '/content/drive/MyDrive/dataset_ts/mlt2017_sample/train.json'
     IMAGE_DIR = '/content/drive/MyDrive/dataset_ts/mlt2017_sample/img'
-    
+
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    
+
     # Build vocabulary from dataset
-    id_to_char, char_to_id, VOCAB_SIZE, PADDING_IDX = build_vocabulary_from_json(JSON_PATH)
+    #id_to_char, char_to_id, VOCAB_SIZE, PADDING_IDX = build_vocabulary_from_json(JSON_PATH)
+    id_to_char, char_to_id, VOCAB_SIZE, PADDING_IDX = build_vocabulary_from_json_v2(
+      JSON_PATH, 
+      save_vocab_path='/content/vocabulary.pkl'
+    )
     print(f"Vocabulary size: {VOCAB_SIZE}, Padding index: {PADDING_IDX}")
 
     # Model parameters
@@ -204,41 +208,83 @@ if __name__ == "__main__":
     NUM_DECODER_LAYERS = 6
     NUM_HEADS = 8
     NUM_FOREGROUND_CLASSES = 1 # 'text' class
-    
+
     MAX_RECOGNITION_SEQ_LEN = 25 
     NUM_POLYGON_POINTS = 16 
-    
-    # Training parameters
-    BATCH_SIZE = 1 # Keep at 1 for now due to complexity of collate_fn for DETR targets
-    LEARNING_RATE = 1e-4
-    NUM_EPOCHS = 200 # Increase for more "learning" (even with random init)
 
+    # Training parameters - IMPROVED
+    BATCH_SIZE = 1
+    LEARNING_RATE = 1e-4
+    NUM_EPOCHS = 50
+    WARMUP_EPOCHS = 5  # Add warmup
+
+    # Data augmentation for training
     transform_train = transforms.Compose([
         AdaptiveResize(min_size=640, max_size=896, max_long_side=1600),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),  # Add augmentation
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-    
+
     transform_test = transforms.Compose([
         AdaptiveResizeTest(shorter_size=1000, max_long_side=1824),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    dataset = TotalTextDataset(json_path=JSON_PATH, img_dir=IMAGE_DIR, transform=transform_train, 
-                               max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN,
-                               padding_value=PADDING_IDX,check_recognition_quality=True)
-    
+    # IMPORTANT: Filter out samples with no meaningful text during training
+    class FilteredDataset(torch.utils.data.Dataset):
+        def __init__(self, base_dataset, min_text_length=1):
+            self.base_dataset = base_dataset
+            self.min_text_length = min_text_length
+            
+            # Filter to keep only samples with meaningful text
+            self.valid_indices = []
+            for idx in range(len(base_dataset)):
+                _, target = base_dataset[idx]
+                # Check if any recognition sequence has non-padding, non-placeholder tokens
+                rec_seqs = target['recognition']
+                has_meaningful_text = False
+                for rec_seq in rec_seqs:
+                    # Count non-padding and non-placeholder (95) tokens
+                    meaningful_tokens = ((rec_seq != 96) & (rec_seq != 95)).sum()
+                    if meaningful_tokens >= self.min_text_length:
+                        has_meaningful_text = True
+                        break
+                if has_meaningful_text:
+                    self.valid_indices.append(idx)
+            
+            print(f"\nFiltered dataset: {len(self.valid_indices)}/{len(base_dataset)} samples have meaningful text")
+        
+        def __len__(self):
+            return len(self.valid_indices)
+        
+        def __getitem__(self, idx):
+            return self.base_dataset[self.valid_indices[idx]]
+
+    # Create base dataset
+    base_dataset = TotalTextDataset(
+        json_path=JSON_PATH, 
+        img_dir=IMAGE_DIR, 
+        transform=transform_train, 
+        max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN,
+        padding_value=PADDING_IDX,
+        check_recognition_quality=True
+    )
+
+    # Filter dataset to keep only samples with meaningful text
+    dataset = FilteredDataset(base_dataset, min_text_length=2)
+
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, collate_fn=collate_fn)
-    
-    USE_ADAPTER = True  # Set to True for adapter-based fine-tuning
-    FREEZE_BACKBONE = False  # Set to True for stage 2 (after pre-training)
-    USE_PQGM = False     # Start with False for initial training, True for multi-task
-    TASK_ID = 0          # 0=word-level, 1=line-level, 2=video-level
+
+    USE_ADAPTER = True
+    FREEZE_BACKBONE = False  # For initial training, keep backbone trainable with lower LR
+    USE_PQGM = False
+    TASK_ID = 0
 
     # --- Initialize Full Model ---
     model = VimTSFullModel(
-        resnet_pretrained=True, # Set to True for real training to get better features
+        resnet_pretrained=True,  # IMPORTANT: Use pretrained backbone
         rem_in_channels=1024,
         rem_out_channels=FEATURE_DIM,
         transformer_feature_dim=FEATURE_DIM,
@@ -254,50 +300,53 @@ if __name__ == "__main__":
         use_pqgm=USE_PQGM, 
         task_id=TASK_ID
     ).to(device)
-    
-    if FREEZE_BACKBONE:
-        print("Freezing backbone and encoder...")
-        for name, param in model.named_parameters():
-            if 'module1' in name and 'task_aware_query_init' not in name:
-                param.requires_grad = False
-            if 'decoder' in name and 'adapter' not in name:
-                param.requires_grad = False
-            if 'prediction_heads' in name and 'adapter' not in name:
-                param.requires_grad = False
-        
-        # Count trainable parameters
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in model.parameters())
-        print(f"Trainable parameters: {trainable_params}/{total_params} ({100*trainable_params/total_params:.2f}%)")
+
+    # --- IMPROVED: Use different learning rates for backbone vs new layers ---
+    backbone_params = []
+    new_params = []
+
+    for name, param in model.named_parameters():
+        if 'resnet_backbone' in name:
+            backbone_params.append(param)
+        else:
+            new_params.append(param)
+
+    param_groups = [
+        {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},  # 10x lower LR for backbone
+        {'params': new_params, 'lr': LEARNING_RATE}
+    ]
 
     # --- Initialize DETR Criterion and Matcher ---
     matcher = HungarianMatcher(
-        cost_class=1, # Weight for classification cost
-        cost_bbox=5,  # Weight for L1 bbox cost
-        cost_giou=2,  # Weight for GIoU bbox cost
-        cost_recognition=2, # Weight for recognition cost
+        cost_class=2,  # Increased from 1
+        cost_bbox=5,
+        cost_giou=2,
+        cost_recognition=2,
         vocab_size=VOCAB_SIZE,
         max_seq_len=MAX_RECOGNITION_SEQ_LEN,
         padding_idx=PADDING_IDX
     )
-    
-    # Weights for the different loss terms during backpropagation
-    weight_dict = {
-        'loss_ce': 2.0,         # λ_c = 2.0 (paper)
-        'loss_bbox': 5.0,       # λ_b = 5.0 (paper)
-        'loss_giou': 2.0,       # GIoU weight (paper)
-        'loss_recognition': 1.0, # α_r = 1.0 (paper)
-        'loss_cardinality': 1.0,
-        'loss_polygon': 1.0     # α_p = 1.0 (paper)
-    }
-    # Losses to compute, as strings
-    losses_to_compute = ['labels', 'boxes', 'polygons', 'recognition', 'cardinality']
 
-    # eos_coef is the weight for the "no_object" class in classification loss
-    # If num_foreground_classes=1 (text), then actual pred_logits output 2 classes (text, no_object).
-    # eos_coef applies to the 'no_object' class.
-    # Set to a value like 0.1 for more stability.
-    eos_coef = 0.1 
+    # IMPROVED: Adjust loss weights based on task importance
+    weight_dict = {
+        'loss_ce': 2.0,          # Classification
+        'loss_bbox': 5.0,        # Bounding box L1
+        'loss_giou': 2.0,        # GIoU
+        'loss_recognition': 3.0, # INCREASED: Recognition is important
+        'loss_cardinality': 1.0,
+        'loss_polygon': 1.0
+    }
+
+    # Start without recognition loss if most data is placeholder
+    losses_to_compute = ['labels', 'boxes', 'cardinality', 'giou']
+    # Add recognition only if you have good quality data
+    if len(dataset) > len(base_dataset) * 0.3:  # If >30% have meaningful text
+        losses_to_compute.append('recognition')
+        print("\nIncluding recognition loss in training")
+    else:
+        print("\nSkipping recognition loss due to insufficient text data")
+
+    eos_coef = 0.1
 
     criterion = SetCriterion(
         num_foreground_classes=NUM_FOREGROUND_CLASSES,
@@ -310,27 +359,32 @@ if __name__ == "__main__":
         padding_idx=PADDING_IDX
     ).to(device)
 
+    optimizer = optim.AdamW(param_groups, lr=LEARNING_RATE, weight_decay=1e-4)
 
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
-    
-    # Learning rate scheduler (as per paper: reduce at 180k and 210k iterations)
-    # For shorter training, we'll use epochs instead
-    scheduler = optim.lr_scheduler.MultiStepLR(
-        optimizer, 
-        milestones=[int(NUM_EPOCHS*0.75), int(NUM_EPOCHS*0.875)],  # 75% and 87.5% of training
-        gamma=0.1
-    )
-    
-    # Gradient accumulation steps (to simulate larger batch size)
+    # IMPROVED: Learning rate scheduler with warmup
+    def get_lr_scheduler_with_warmup(optimizer, warmup_epochs, total_epochs):
+        def lr_lambda(epoch):
+            if epoch < warmup_epochs:
+                # Linear warmup
+                return (epoch + 1) / warmup_epochs
+            else:
+                # Cosine annealing after warmup
+                progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
+                return 0.5 * (1 + math.cos(math.pi * progress))
+        
+        return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    scheduler = get_lr_scheduler_with_warmup(optimizer, WARMUP_EPOCHS, NUM_EPOCHS)
+
+    # Gradient accumulation and clipping
     ACCUMULATION_STEPS = 4
-    
-    from torch.cuda.amp import autocast, GradScaler
-    scaler = GradScaler()
-    
-    # Add gradient clipping
     MAX_GRAD_NORM = 0.1
 
-    print(f"Total parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    from torch.cuda.amp import autocast, GradScaler
+    scaler = GradScaler()
+
+    print(f"\nTotal parameters: {sum(p.numel() for p in model.parameters())}")
+    print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     # --- Training Loop ---
     print("\nStarting DETR-style training loop...")

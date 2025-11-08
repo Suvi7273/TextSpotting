@@ -1,5 +1,3 @@
-# text_spotting_dataset.py - Updated for MLT Dataset Compatibility
-
 import torch
 from torchvision import transforms
 from PIL import Image
@@ -8,6 +6,151 @@ import os
 import random
 import numpy as np
 import torch.nn.functional as F
+
+def build_vocabulary_from_json_v2(json_path, save_vocab_path=None):
+    """
+    Improved vocabulary building with proper character mapping.
+    
+    Analyzes the dataset and creates a proper mapping from character IDs to actual characters.
+    Handles the MLT dataset format where IDs 0-94 represent printable ASCII characters.
+    
+    Returns: id_to_char dict, char_to_id dict, vocab_size, padding_idx
+    """
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+    
+    all_char_ids = set()
+    sample_recs = []
+    
+    # Collect all character IDs
+    for ann in data['annotations']:
+        if 'rec' in ann and ann['rec']:
+            all_char_ids.update(ann['rec'])
+            if len(sample_recs) < 10:
+                sample_recs.append(ann['rec'])
+    
+    print(f"\n{'='*80}")
+    print(f"VOCABULARY BUILDING - IMPROVED")
+    print(f"{'='*80}")
+    print(f"\nAll unique character IDs found: {sorted(list(all_char_ids))}")
+    print(f"Total unique IDs: {len(all_char_ids)}")
+    
+    # Sample sequences for debugging
+    print(f"\nSample recognition sequences:")
+    for i, rec in enumerate(sample_recs[:5]):
+        display_rec = rec[:15] if len(rec) > 15 else rec
+        print(f"  Sample {i+1}: {display_rec}")
+    
+    # Create character mapping
+    # Standard MLT format: IDs 0-94 map to ASCII 32-126 (printable characters)
+    # ID 95: unknown/placeholder
+    # ID 96: padding
+    
+    id_to_char = {}
+    
+    # Map printable ASCII characters (space to tilde)
+    for char_id in sorted(list(all_char_ids)):
+        if 0 <= char_id <= 94:
+            # Map to printable ASCII: ID 0 → space (ASCII 32), ID 94 → tilde (ASCII 126)
+            mapped_char = chr(char_id + 32)
+            id_to_char[char_id] = mapped_char
+        elif char_id == 95:
+            id_to_char[char_id] = '<unk>'  # Unknown/placeholder
+        elif char_id == 96:
+            id_to_char[char_id] = '<pad>'  # Padding
+        else:
+            # Handle any unexpected IDs
+            id_to_char[char_id] = f'<char_{char_id}>'
+    
+    # Reverse mapping
+    char_to_id = {v: k for k, v in id_to_char.items()}
+    
+    # Vocab size should be max_id + 1
+    vocab_size = max(all_char_ids) + 1 if all_char_ids else 97
+    padding_idx = 96
+    
+    print(f"\n{'='*80}")
+    print(f"VOCABULARY SUMMARY")
+    print(f"{'='*80}")
+    print(f"Vocabulary size: {vocab_size}")
+    print(f"Padding index: {padding_idx}")
+    print(f"Unique character IDs: {len(all_char_ids)}")
+    
+    # Display character mapping
+    print(f"\nCharacter Mapping (showing all non-padding/placeholder):")
+    meaningful_ids = sorted([i for i in all_char_ids if i not in [95, 96]])
+    
+    if meaningful_ids:
+        print(f"\n  {'ID':<5} {'Char':<10} {'ASCII':<10} {'Description'}")
+        print(f"  {'-'*50}")
+        for char_id in meaningful_ids[:30]:  # Show first 30
+            char = id_to_char[char_id]
+            ascii_val = ord(char) if len(char) == 1 else '-'
+            desc = get_char_description(char)
+            print(f"  {char_id:<5} '{char}'  {str(ascii_val):<10} {desc}")
+        
+        if len(meaningful_ids) > 30:
+            print(f"  ... and {len(meaningful_ids) - 30} more characters")
+    
+    # Test decoding some sample sequences
+    print(f"\n{'='*80}")
+    print(f"SAMPLE DECODED SEQUENCES")
+    print(f"{'='*80}")
+    for i, rec_ids in enumerate(sample_recs[:5]):
+        decoded = ''
+        for char_id in rec_ids:
+            if char_id == 96:  # Padding
+                break
+            if char_id == 95:  # Unknown
+                decoded += '<?>'
+            elif char_id in id_to_char:
+                decoded += id_to_char[char_id]
+            else:
+                decoded += f'<{char_id}>'
+        
+        print(f"Sample {i+1}:")
+        print(f"  IDs: {rec_ids[:15]}")
+        print(f"  Text: '{decoded}'")
+    
+    print(f"\n{'='*80}\n")
+    
+    # Optionally save vocabulary
+    if save_vocab_path:
+        vocab_data = {
+            'id_to_char': id_to_char,
+            'char_to_id': char_to_id,
+            'vocab_size': vocab_size,
+            'padding_idx': padding_idx
+        }
+        import pickle
+        with open(save_vocab_path, 'wb') as f:
+            pickle.dump(vocab_data, f)
+        print(f"Vocabulary saved to {save_vocab_path}")
+    
+    return id_to_char, char_to_id, vocab_size, padding_idx
+
+
+def get_char_description(char):
+    """Helper function to describe characters"""
+    if char == ' ':
+        return 'space'
+    elif char == '<unk>':
+        return 'unknown/placeholder'
+    elif char == '<pad>':
+        return 'padding'
+    elif char.isalpha():
+        return 'letter'
+    elif char.isdigit():
+        return 'digit'
+    elif char in '.,;:!?':
+        return 'punctuation'
+    elif char in '+-*/=':
+        return 'math operator'
+    elif char in '()[]{}':
+        return 'bracket'
+    else:
+        return 'special'
+
 
 def build_vocabulary_from_json(json_path):
     """
