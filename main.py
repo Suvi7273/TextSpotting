@@ -215,7 +215,7 @@ if __name__ == "__main__":
     # Training parameters - IMPROVED
     BATCH_SIZE = 1
     LEARNING_RATE = 1e-4
-    NUM_EPOCHS = 50
+    NUM_EPOCHS = 100
     WARMUP_EPOCHS = 5  # Add warmup
 
     # Data augmentation for training
