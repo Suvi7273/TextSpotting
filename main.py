@@ -211,7 +211,7 @@ if __name__ == "__main__":
     # Training parameters
     BATCH_SIZE = 1 # Keep at 1 for now due to complexity of collate_fn for DETR targets
     LEARNING_RATE = 1e-4
-    NUM_EPOCHS = 100 # Increase for more "learning" (even with random init)
+    NUM_EPOCHS = 200 # Increase for more "learning" (even with random init)
 
     transform_train = transforms.Compose([
         AdaptiveResize(min_size=640, max_size=896, max_long_side=1600),
