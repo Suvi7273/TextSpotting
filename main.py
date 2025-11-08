@@ -211,7 +211,7 @@ if __name__ == "__main__":
     # Training parameters
     BATCH_SIZE = 1 # Keep at 1 for now due to complexity of collate_fn for DETR targets
     LEARNING_RATE = 1e-4
-    NUM_EPOCHS = 50 # Increase for more "learning" (even with random init)
+    NUM_EPOCHS = 100 # Increase for more "learning" (even with random init)
 
     transform_train = transforms.Compose([
         AdaptiveResize(min_size=640, max_size=896, max_long_side=1600),
@@ -462,16 +462,3 @@ if __name__ == "__main__":
     print(f"Saved visualization to {output_filename}")
     
     plt.show() # MUST be the very last line in the cell
-
-    # print("\n--- IMPORTANT NOTES ON DETR-STYLE TRAINING ---")
-    # print("1. This is a conceptual implementation of DETR loss components. ")
-    # print("   The matching process (Hungarian algorithm) and loss calculations are more robust.")
-    # print("2. `resnet_pretrained` is set to `False`. For actual performance, set it to `True`.")
-    # print("3. Positional embeddings for Transformer Encoder/Decoder are omitted for simplicity but are CRUCIAL.")
-    # print("4. This code uses a simplified `id_to_char` mapping. A proper vocabulary building is needed.")
-    # print("5. DETR's `collate_fn` for batching images (NestedTensor) and targets (list of dicts) ")
-    # print("   is more complex than implemented here, especially for variable-sized elements.")
-    # print("   The current `collate_fn` only handles `batch_size=1` effectively.")
-    # print("6. Polygon loss is an L1 on bezier points, which is a simplification. ")
-    # print("   Advanced methods might use specialized polygon IoU or curve matching metrics.")
-    # print("7. For robust results, always refer to the official DETR/VimTS/ESTextSpotter implementations.")
