@@ -212,7 +212,7 @@ if __name__ == "__main__":
     # Build vocabulary (excluding Arabic)
     id_to_char, char_to_id, VOCAB_SIZE, PADDING_IDX = build_vocabulary_from_text_files(
         gt_dir=GT_DIR,
-        filter_languages=['Arabic'],  # Filter out Arabic
+        filter_languages=['Latin'],  # Filter out Arabic
         save_vocab_path='/content/vocabulary.pkl'
     )
 
