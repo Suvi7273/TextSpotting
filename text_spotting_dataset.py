@@ -233,7 +233,7 @@ def build_vocabulary_from_text_files(gt_dir, filter_languages=None, save_vocab_p
                 text = ','.join(parts[9:])
                 
                 # Skip filtered languages
-                if language in filter_languages:
+                if language not in filter_languages:
                     continue
                 
                 all_chars.update(text)

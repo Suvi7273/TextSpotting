@@ -91,20 +91,32 @@ class VimTSFullModel(nn.Module):
 
         return final_predictions
 
-# --- Visualization Function (updated to use new pred_logits format) ---
-def visualize_output(original_image_path, model_output, gt_info, vocab_map=None, padding_idx=None, show_gt=True, show_preds=True, score_threshold=0.5):
-    image = Image.open(original_image_path).convert('RGB')
+def visualize_output(original_image_path, model_output, gt_info, vocab_map=None, padding_idx=None, 
+                     show_gt=True, show_preds=True, score_threshold=0.5, max_preds=50):
+    """
+    Visualize predictions and ground truth on image.
     
+    Args:
+        original_image_path: Path to original image
+        model_output: Dictionary with model predictions
+        gt_info: Ground truth target dictionary
+        vocab_map: Character ID to character mapping
+        padding_idx: Padding index for recognition
+        show_gt: Whether to show ground truth
+        show_preds: Whether to show predictions
+        score_threshold: Minimum confidence score to display
+        max_preds: Maximum number of predictions to show
+    """
+    image = Image.open(original_image_path).convert('RGB')
     img_width, img_height = image.size
 
-    plt.figure(figsize=(12, 12)) # Make figure a bit larger
+    plt.figure(figsize=(16, 12))
     plt.imshow(image)
     ax = plt.gca()
 
     # --- Draw Ground Truth ---
-    if show_gt:
-        for bbox_coords in gt_info['boxes']: # Use 'boxes' from new target format
-            # Convert normalized cxcywh to pixel xywh for drawing
+    if show_gt and gt_info['boxes'].numel() > 0:
+        for bbox_coords in gt_info['boxes']:
             cx_norm, cy_norm, w_norm, h_norm = bbox_coords.tolist()
             x_min = (cx_norm - w_norm / 2) * img_width
             y_min = (cy_norm - h_norm / 2) * img_height
@@ -112,43 +124,36 @@ def visualize_output(original_image_path, model_output, gt_info, vocab_map=None,
             height = h_norm * img_height
 
             rect = patches.Rectangle((x_min, y_min), width, height, 
-                                     linewidth=1, edgecolor='g', facecolor='none', linestyle='--')
+                                     linewidth=2, edgecolor='green', facecolor='none', linestyle='--')
             ax.add_patch(rect)
-        
-        # GT Polygons
-        for poly_coords_norm_tensor in gt_info['polygons']: # List of tensors now
-            poly_coords_norm_list = poly_coords_norm_tensor.tolist()
-            # Convert normalized polygon points back to pixel coordinates
-            poly_pixel = []
-            for i in range(0, len(poly_coords_norm_list), 2):
-                poly_pixel.append(poly_coords_norm_list[i] * img_width)
-                poly_pixel.append(poly_coords_norm_list[i+1] * img_height)
-            
-            poly = [(poly_pixel[i], poly_pixel[i+1]) for i in range(0, len(poly_pixel), 2)]
-            if len(poly) > 0:
-                polygon_patch = patches.Polygon(poly, closed=True, linewidth=2, edgecolor='b', facecolor='none')
-                ax.add_patch(polygon_patch)
-        
-        plt.text(5, 5, "Green dashed: GT BBox", color='g', fontsize=8, bbox=dict(facecolor='white', alpha=0.5))
-        plt.text(5, 20, "Blue: GT Polygon", color='b', fontsize=8, bbox=dict(facecolor='white', alpha=0.5))
 
     # --- Draw Predictions ---
     if show_preds:
-        # Get final predicted bboxes and logits
-        # pred_logits are raw logits (B, N_queries, num_classes+1)
-        # We want the probability of the foreground class (class 0 'text')
-        pred_logits_raw = model_output['pred_logits'][0] # (N_queries, num_classes+1)
-        pred_scores = F.softmax(pred_logits_raw, dim=-1)[:, 0] # Probability of 'text' class
+        pred_logits_raw = model_output['pred_logits'][0]  # (N_queries, num_classes)
+        pred_scores = F.softmax(pred_logits_raw, dim=-1)[:, 0]  # Probability of 'text' class
         
-        final_pred_bboxes = model_output['pred_bboxes'][0] # (N_queries, 4) (cx, cy, w, h)
-        final_pred_rec_logits = model_output['pred_chars_logits'][0] # (N_queries, max_seq_len, vocab_size)
+        final_pred_bboxes = model_output['pred_bboxes'][0]  # (N_queries, 4)
+        final_pred_rec_logits = model_output['pred_chars_logits'][0] if 'pred_chars_logits' in model_output else None
 
-        for i in range(final_pred_bboxes.shape[0]):
-            score = pred_scores[i].item()
+        # Sort predictions by score
+        scores_np = pred_scores.cpu().numpy()
+        sorted_indices = np.argsort(scores_np)[::-1]  # Descending order
+        
+        # Count how many predictions above threshold
+        num_above_threshold = (scores_np >= score_threshold).sum()
+        print(f"\nPredictions above threshold {score_threshold}: {num_above_threshold}")
+        print(f"Top 10 scores: {sorted(scores_np, reverse=True)[:10]}")
+        
+        predictions_drawn = 0
+        for idx in sorted_indices:
+            if predictions_drawn >= max_preds:
+                break
+                
+            score = scores_np[idx]
             
             if score >= score_threshold:
-                bbox_data = final_pred_bboxes[i]
-                cx_norm, cy_norm, w_norm, h_norm = bbox_data.tolist()
+                bbox_data = final_pred_bboxes[idx]
+                cx_norm, cy_norm, w_norm, h_norm = bbox_data.cpu().tolist()
                 
                 # Convert normalized (cx, cy, w, h) to pixel (x_min, y_min, width, height)
                 x_min = (cx_norm - w_norm / 2) * img_width
@@ -156,34 +161,50 @@ def visualize_output(original_image_path, model_output, gt_info, vocab_map=None,
                 width = w_norm * img_width
                 height = h_norm * img_height
 
+                # Draw bounding box
                 rect = patches.Rectangle((x_min, y_min), width, height,
-                                         linewidth=1, edgecolor='red', facecolor='none', linestyle='-')
+                                         linewidth=2, edgecolor='red', facecolor='none', linestyle='-')
                 ax.add_patch(rect)
                 
-                # Decode recognition prediction if vocab_map is provided
+                # Decode recognition prediction
                 predicted_text = ""
-                if vocab_map and final_pred_rec_logits.shape[0] > i:
-                    rec_logits_per_query = final_pred_rec_logits[i] # (max_seq_len, vocab_size)
-                    predicted_char_ids = rec_logits_per_query.argmax(dim=-1).tolist()
+                if vocab_map and final_pred_rec_logits is not None:
+                    rec_logits_per_query = final_pred_rec_logits[idx]  # (max_seq_len, vocab_size)
+                    predicted_char_ids = rec_logits_per_query.argmax(dim=-1).cpu().tolist()
                     for char_id in predicted_char_ids:
-                        if char_id == padding_idx: # Use the passed padding_idx
+                        if char_id == padding_idx:
                             break
-                        predicted_text += vocab_map.get(char_id, '?') # Map ID to char
+                        predicted_text += vocab_map.get(char_id, '?')
                 
-                text_label = f'{score:.2f}'
+                # Create label
+                text_label = f'{score:.3f}'
                 if predicted_text:
                     text_label += f' "{predicted_text}"'
 
-                plt.text(x_min, y_min - 5, text_label, color='red', fontsize=7, bbox=dict(facecolor='white', alpha=0.5))
+                # Draw label with background
+                plt.text(x_min, y_min - 5, text_label, color='white', fontsize=9, 
+                        weight='bold', bbox=dict(facecolor='red', alpha=0.7, pad=2))
+                
+                predictions_drawn += 1
         
-        plt.text(5, 35, f"Red: Predicted BBox (score > {score_threshold})", color='red', fontsize=8, bbox=dict(facecolor='white', alpha=0.5))
+        print(f"Drew {predictions_drawn} predictions")
+
+    # Add legend
+    legend_y = 20
+    if show_gt:
+        plt.text(10, legend_y, "Green dashed: Ground Truth", color='white', fontsize=10, 
+                weight='bold', bbox=dict(facecolor='green', alpha=0.7, pad=3))
+        legend_y += 25
+    if show_preds:
+        plt.text(10, legend_y, f"Red solid: Predictions (score ≥ {score_threshold})", color='white', 
+                fontsize=10, weight='bold', bbox=dict(facecolor='red', alpha=0.7, pad=3))
 
     plt.axis('off')
-    plt.title(f"Image: {gt_info['file_name']}")
-    # plt.show() # Removed as per Colab fix
+    plt.title(f"Image: {gt_info['file_name']}", fontsize=14, weight='bold')
+    plt.tight_layout()
+    
 
 import math
-# --- Example Usage / Training Loop ---
 if __name__ == "__main__":
     GT_DIR = '/content/drive/MyDrive/dataset_ts/mlt_sample/Train_GT'
     IMAGE_DIR = '/content/drive/MyDrive/dataset_ts/mlt_sample/TrainImages'
@@ -197,14 +218,9 @@ if __name__ == "__main__":
 
     print(f"Vocabulary size: {VOCAB_SIZE}, Padding index: {PADDING_IDX}")
 
-    # ... (keep model parameters the same) ...
-
-
-
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-
 
     # Model parameters
     FEATURE_DIM = 1024
@@ -284,13 +300,39 @@ if __name__ == "__main__":
         max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN,
         padding_value=PADDING_IDX,
         char_to_id=char_to_id,
-        filter_languages=['Arabic']  # Filter out Arabic during training
+        filter_languages=['Latin']  # Have english only
     )
 
     # Apply the FilteredDataset wrapper if needed
     dataset = FilteredDataset(base_dataset, min_text_length=2)
 
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, collate_fn=collate_fn)
+    
+    # --- IMPORTANT: Check data quality ---
+    print("\n" + "="*80)
+    print("DATA QUALITY CHECK")
+    print("="*80)
+
+    # Check a few samples
+    for i in range(min(3, len(dataset))):
+        img, target = dataset[i]
+        print(f"\nSample {i}:")
+        print(f"  Image shape: {img.shape}")
+        print(f"  Num boxes: {len(target['boxes'])}")
+        print(f"  Num polygons: {len(target['polygons'])}")
+        print(f"  Num recognition seqs: {len(target['recognition'])}")
+        
+        # Check recognition quality
+        if len(target['recognition']) > 0:
+            for j, rec_seq in enumerate(target['recognition'][:3]):
+                non_padding = (rec_seq != PADDING_IDX).sum().item()
+                print(f"    Recognition {j}: {non_padding} non-padding tokens")
+                # Decode
+                text = ''.join([id_to_char.get(cid.item(), '?') 
+                            for cid in rec_seq if cid.item() != PADDING_IDX])
+                print(f"      Text: '{text}'")
+
+    print("="*80 + "\n")
 
     USE_ADAPTER = True
     FREEZE_BACKBONE = False  # For initial training, keep backbone trainable with lower LR
@@ -509,15 +551,13 @@ if __name__ == "__main__":
     }, checkpoint_path)
     print(f"Model saved to {checkpoint_path}")
 
-    # --- Inference and Visualization after training ---
-    print("\nRunning inference and visualization on a random sample after training...")
-    model.eval() # Set model to evaluation mode
-    criterion.eval()
-    
-    # Pick a random image from the dataset for visualization
+    # --- After training, visualize results ---
+    print("\nRunning inference on a sample...")
+    model.eval()
+
     sample_idx = random.randint(0, len(dataset) - 1)
     image_tensor_viz, gt_info_viz = dataset[sample_idx]
-    
+
     if image_tensor_viz.dim() == 3:
         image_tensor_viz = image_tensor_viz.unsqueeze(0)
     image_tensor_viz = image_tensor_viz.to(device)
@@ -525,25 +565,35 @@ if __name__ == "__main__":
     with torch.no_grad():
         output_viz = model(image_tensor_viz)
 
-    print("\n--- Output of Full VimTS Model (after training) ---")
+    print("\n--- Model Output Statistics ---")
     print(f"Pred BBoxes shape: {output_viz['pred_bboxes'].shape}")
     print(f"Pred Logits shape: {output_viz['pred_logits'].shape}")
-    print(f"Pred Chars Logits shape: {output_viz['pred_chars_logits'].shape}")
-    
-    pred_logits_scores = F.softmax(output_viz['pred_logits'][0], dim=-1)[:, 0].cpu().numpy() # Probability of 'text' class
-    high_score_preds = [s for s in pred_logits_scores if s >= 0.01]
-    print(f"Number of refined predicted bboxes (score >= 0.01): {len(high_score_preds)}")
+
+    pred_logits_scores = F.softmax(output_viz['pred_logits'][0], dim=-1)[:, 0].cpu().numpy()
+    print(f"\nScore statistics:")
+    print(f"  Max score: {pred_logits_scores.max():.4f}")
+    print(f"  Mean score: {pred_logits_scores.mean():.4f}")
+    print(f"  Min score: {pred_logits_scores.min():.4f}")
+    print(f"  Scores > 0.5: {(pred_logits_scores > 0.5).sum()}")
+    print(f"  Scores > 0.1: {(pred_logits_scores > 0.1).sum()}")
+    print(f"  Scores > 0.01: {(pred_logits_scores > 0.01).sum()}")
 
     original_image_full_path = os.path.join(IMAGE_DIR, gt_info_viz['file_name'])
-    
-    print(f"\nVisualizing final output for image: {gt_info_viz['file_name']}")
-    visualize_output(original_image_full_path, output_viz, gt_info_viz, 
-                     vocab_map=id_to_char, padding_idx=PADDING_IDX, # Pass vocab map for recognition text
-                     show_gt=True, show_preds=True, score_threshold=0.01)
 
-    # --- Save the output image ---
-    output_filename = f"final_visualization_{gt_info_viz['file_name']}.png"
-    plt.savefig(output_filename, bbox_inches='tight', pad_inches=0.1) # Added bbox_inches and pad_inches
-    print(f"Saved visualization to {output_filename}")
-    
-    plt.show() # MUST be the very last line in the cell
+    # Use lower threshold to see all detections
+    visualize_output(
+        original_image_full_path, 
+        output_viz, 
+        gt_info_viz, 
+        vocab_map=id_to_char, 
+        padding_idx=PADDING_IDX,
+        show_gt=True, 
+        show_preds=True, 
+        score_threshold=0.01,  # Very low threshold to see all predictions
+        max_preds=100
+    )
+
+    output_filename = f"visualization_{gt_info_viz['file_name']}"
+    plt.savefig(output_filename, bbox_inches='tight', dpi=150)
+    print(f"\nSaved visualization to {output_filename}")
+    plt.show()
