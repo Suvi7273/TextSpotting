@@ -212,7 +212,7 @@ if __name__ == "__main__":
     # Build vocabulary (excluding Arabic)
     id_to_char, char_to_id, VOCAB_SIZE, PADDING_IDX = build_vocabulary_from_text_files(
         gt_dir=GT_DIR,
-        filter_languages=['Latin'],  # Filter out Arabic
+        filter_languages=['Arabic'],  # Filter out Arabic
         save_vocab_path='/content/vocabulary.pkl'
     )
 
@@ -292,7 +292,6 @@ if __name__ == "__main__":
     #     padding_value=PADDING_IDX,
     #     check_recognition_quality=True
     # )
-    # Create dataset with new format
     base_dataset = TextFileDataset(
         gt_dir=GT_DIR,
         img_dir=IMAGE_DIR,
@@ -300,7 +299,8 @@ if __name__ == "__main__":
         max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN,
         padding_value=PADDING_IDX,
         char_to_id=char_to_id,
-        filter_languages=['Latin']  # Have english only
+        filter_languages=['Arabic'],      # Exclude Arabic
+        require_language='Latin'           # NEW: Only include images with Latin text
     )
 
     # Apply the FilteredDataset wrapper if needed

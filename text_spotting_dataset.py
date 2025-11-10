@@ -15,7 +15,8 @@ class TextFileDataset(torch.utils.data.Dataset):
     """
     def __init__(self, gt_dir, img_dir, transform=None, 
                  max_recognition_seq_len=25, padding_value=96,
-                 char_to_id=None, filter_languages=None):
+                 char_to_id=None, filter_languages=None,
+                 require_language=None):  # NEW PARAMETER
         """
         Args:
             gt_dir: Directory containing ground truth .txt files
@@ -25,6 +26,7 @@ class TextFileDataset(torch.utils.data.Dataset):
             padding_value: Padding index for recognition sequences
             char_to_id: Dictionary mapping characters to IDs
             filter_languages: List of languages to exclude (e.g., ['Arabic'])
+            require_language: If set, only include images with at least one annotation in this language (e.g., 'Latin')
         """
         self.gt_dir = gt_dir
         self.img_dir = img_dir
@@ -33,18 +35,74 @@ class TextFileDataset(torch.utils.data.Dataset):
         self.padding_value = padding_value
         self.char_to_id = char_to_id
         self.filter_languages = filter_languages if filter_languages else []
+        self.require_language = require_language  # NEW
         
         # Get all txt files
-        self.gt_files = [f for f in os.listdir(gt_dir) if f.endswith('.txt')]
-        self.gt_files.sort()
+        all_gt_files = [f for f in os.listdir(gt_dir) if f.endswith('.txt')]
+        all_gt_files.sort()
+        
+        # NEW: Filter files based on language requirements
+        self.gt_files = []
+        skipped_no_latin = 0
+        skipped_no_annotations = 0
+        
+        for gt_file in all_gt_files:
+            gt_path = os.path.join(gt_dir, gt_file)
+            has_required_language = False
+            has_valid_annotations = False
+            
+            with open(gt_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split(',')
+                    if len(parts) < 10:
+                        continue
+                    
+                    language = parts[8]
+                    
+                    # Skip filtered languages
+                    if language in self.filter_languages:
+                        continue
+                    
+                    has_valid_annotations = True
+                    
+                    # Check if required language is present
+                    if self.require_language:
+                        if language == self.require_language:
+                            has_required_language = True
+                            break  # Found required language, no need to continue
+                    else:
+                        has_required_language = True  # No requirement, accept all
+            
+            # Include file only if it meets requirements
+            if self.require_language:
+                if has_required_language:
+                    self.gt_files.append(gt_file)
+                else:
+                    if has_valid_annotations:
+                        skipped_no_latin += 1
+                    else:
+                        skipped_no_annotations += 1
+            else:
+                if has_valid_annotations:
+                    self.gt_files.append(gt_file)
+                else:
+                    skipped_no_annotations += 1
         
         print(f"\n{'='*80}")
         print(f"Loading TextFile Dataset")
         print(f"{'='*80}")
         print(f"Ground truth directory: {gt_dir}")
         print(f"Image directory: {img_dir}")
-        print(f"Total annotation files: {len(self.gt_files)}")
+        print(f"Total annotation files found: {len(all_gt_files)}")
         print(f"Filtering out languages: {self.filter_languages}")
+        if self.require_language:
+            print(f"Requiring language: {self.require_language}")
+            print(f"  - Files WITH {self.require_language}: {len(self.gt_files)}")
+            print(f"  - Files WITHOUT {self.require_language}: {skipped_no_latin}")
+            print(f"  - Files with no valid annotations: {skipped_no_annotations}")
+        else:
+            print(f"Files with valid annotations: {len(self.gt_files)}")
+            print(f"Files skipped (no valid annotations): {skipped_no_annotations}")
         print(f"{'='*80}\n")
     
     def __len__(self):
@@ -233,7 +291,7 @@ def build_vocabulary_from_text_files(gt_dir, filter_languages=None, save_vocab_p
                 text = ','.join(parts[9:])
                 
                 # Skip filtered languages
-                if language not in filter_languages:
+                if language in filter_languages:
                     continue
                 
                 all_chars.update(text)
