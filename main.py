@@ -185,7 +185,7 @@ def visualize_output(original_image_path, model_output, gt_info, vocab_map=None,
 import math
 # --- Example Usage / Training Loop ---
 if __name__ == "__main__":
-    GT_DIR = '/content/drive/MyDrive/dataset_ts/mlt_sample/TrainGT'
+    GT_DIR = '/content/drive/MyDrive/dataset_ts/mlt_sample/Train_GT'
     IMAGE_DIR = '/content/drive/MyDrive/dataset_ts/mlt_sample/TrainImages'
 
     # Build vocabulary (excluding Arabic)
