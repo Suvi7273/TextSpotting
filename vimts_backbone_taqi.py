@@ -120,24 +120,20 @@ class TransformerEncoder(nn.Module):
         return output # (B, H*W, C)
 
 # --- 2. Task-aware Query Initialization (TAQI) ---
-
 class TaskAwareQueryInitialization(nn.Module):
-    """
-    Conceptual Task-aware Query Initialization (TAQI).
-    This is highly simplified for demonstration.
-    A real TAQI (like in ESTextSpotter) would involve learnable query embeddings
-    that interact with image features through attention to propose bounding boxes
-    and initialize task-specific queries.
-    """
     def __init__(self, feature_dim, num_queries):
         super().__init__()
         self.num_queries = num_queries
         
         self.query_embed = nn.Embedding(num_queries, feature_dim)
         
-        self.bbox_coord_head = nn.Linear(feature_dim, 4) # (cx, cy, w, h)
-        self.bbox_score_head = nn.Linear(feature_dim, 1) # objectness score
-
+        # 🔧 ADD THIS:
+        self.cross_attention = nn.MultiheadAttention(
+            feature_dim, num_heads=8, batch_first=True
+        )
+        
+        self.bbox_coord_head = nn.Linear(feature_dim, 4)
+        self.bbox_score_head = nn.Linear(feature_dim, 1)
         self.detection_query_project = nn.Linear(feature_dim, feature_dim)
         self.recognition_query_project = nn.Linear(feature_dim, feature_dim)
 
@@ -147,18 +143,22 @@ class TaskAwareQueryInitialization(nn.Module):
         # Static query embeddings
         initial_queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
         
-        # 🔧 FIX: Add cross-attention with image features
-        q = initial_queries
-        k = v = encoded_features
-        attended_queries, _ = self.cross_attention(q, k, v)
+        # 🔧 Cross-attention with image features
+        attended_queries, _ = self.cross_attention(
+            initial_queries,  # queries
+            encoded_features, # keys
+            encoded_features  # values
+        )
         
-        # Now predict boxes from image-aware queries
+        # Now predict from image-aware queries
         coarse_bboxes_coords = self.bbox_coord_head(attended_queries).sigmoid()
+        coarse_bboxes_scores = self.bbox_score_head(attended_queries).sigmoid()
+        coarse_bboxes_and_scores = torch.cat([coarse_bboxes_coords, coarse_bboxes_scores], dim=-1)
         
         detection_queries = self.detection_query_project(attended_queries)
         recognition_queries = self.recognition_query_project(attended_queries)
         
-        return encoded_features, detection_queries, recognition_queries, coarse_bboxes_coords
+        return encoded_features, detection_queries, recognition_queries, coarse_bboxes_and_scores
 
 # This is the "Module 1" wrapper
 class VimTSModule1(nn.Module):
