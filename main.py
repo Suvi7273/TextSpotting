@@ -15,7 +15,7 @@ import torch.nn.functional as F
 # Import modules from the separate files
 from vimts_backbone_taqi import VimTSModule1
 from vimts_decoder_heads import TaskAwareDecoder, TaskAwareDecoderLayer, PredictionHeads
-from text_spotting_dataset import TotalTextDataset, collate_fn ,build_vocabulary_from_json, AdaptiveResize, AdaptiveResizeTest, build_vocabulary_from_json_v2
+from text_spotting_dataset import TotalTextDataset, collate_fn , AdaptiveResize, AdaptiveResizeTest, build_vocabulary_from_text_files, TextFileDataset
 from matcher import HungarianMatcher, box_cxcywh_to_xyxy 
 from detr_losses import SetCriterion 
 
@@ -185,21 +185,26 @@ def visualize_output(original_image_path, model_output, gt_info, vocab_map=None,
 import math
 # --- Example Usage / Training Loop ---
 if __name__ == "__main__":
-    # --- Configuration ---
-    JSON_PATH = '/content/drive/MyDrive/dataset_ts/mlt2017_sample/train.json'
-    IMAGE_DIR = '/content/drive/MyDrive/dataset_ts/mlt2017_sample/img'
+    GT_DIR = '/content/drive/MyDrive/dataset_ts/mlt_sample/TrainGT'
+    IMAGE_DIR = '/content/drive/MyDrive/dataset_ts/mlt_sample/TrainImages'
+
+    # Build vocabulary (excluding Arabic)
+    id_to_char, char_to_id, VOCAB_SIZE, PADDING_IDX = build_vocabulary_from_text_files(
+        gt_dir=GT_DIR,
+        filter_languages=['Arabic'],  # Filter out Arabic
+        save_vocab_path='/content/vocabulary.pkl'
+    )
+
+    print(f"Vocabulary size: {VOCAB_SIZE}, Padding index: {PADDING_IDX}")
+
+    # ... (keep model parameters the same) ...
+
+
 
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Build vocabulary from dataset
-    #id_to_char, char_to_id, VOCAB_SIZE, PADDING_IDX = build_vocabulary_from_json(JSON_PATH)
-    id_to_char, char_to_id, VOCAB_SIZE, PADDING_IDX = build_vocabulary_from_json_v2(
-      JSON_PATH, 
-      save_vocab_path='/content/vocabulary.pkl'
-    )
-    print(f"Vocabulary size: {VOCAB_SIZE}, Padding index: {PADDING_IDX}")
 
     # Model parameters
     FEATURE_DIM = 1024
@@ -263,16 +268,26 @@ if __name__ == "__main__":
             return self.base_dataset[self.valid_indices[idx]]
 
     # Create base dataset
-    base_dataset = TotalTextDataset(
-        json_path=JSON_PATH, 
-        img_dir=IMAGE_DIR, 
-        transform=transform_train, 
+    # base_dataset = TotalTextDataset(
+    #     json_path=JSON_PATH, 
+    #     img_dir=IMAGE_DIR, 
+    #     transform=transform_train, 
+    #     max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN,
+    #     padding_value=PADDING_IDX,
+    #     check_recognition_quality=True
+    # )
+    # Create dataset with new format
+    base_dataset = TextFileDataset(
+        gt_dir=GT_DIR,
+        img_dir=IMAGE_DIR,
+        transform=transform_train,
         max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN,
         padding_value=PADDING_IDX,
-        check_recognition_quality=True
+        char_to_id=char_to_id,
+        filter_languages=['Arabic']  # Filter out Arabic during training
     )
 
-    # Filter dataset to keep only samples with meaningful text
+    # Apply the FilteredDataset wrapper if needed
     dataset = FilteredDataset(base_dataset, min_text_length=2)
 
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, collate_fn=collate_fn)
