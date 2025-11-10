@@ -284,14 +284,6 @@ if __name__ == "__main__":
             return self.base_dataset[self.valid_indices[idx]]
 
     # Create base dataset
-    # base_dataset = TotalTextDataset(
-    #     json_path=JSON_PATH, 
-    #     img_dir=IMAGE_DIR, 
-    #     transform=transform_train, 
-    #     max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN,
-    #     padding_value=PADDING_IDX,
-    #     check_recognition_quality=True
-    # )
     base_dataset = TextFileDataset(
         gt_dir=GT_DIR,
         img_dir=IMAGE_DIR,

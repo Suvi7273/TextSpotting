@@ -36,7 +36,7 @@ class ReceptiveEnhancementModule(nn.Module):
     Receptive Enhancement Module (REM) as described in the paper.
     Uses a convolutional layer with a large kernel to enlarge the receptive field.
     """
-    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, stride=1):
+    def __init__(self, in_channels, out_channels, kernel_size=5, padding=1, stride=1):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size,
                               padding=padding, stride=stride)
@@ -105,7 +105,7 @@ class TransformerEncoder(nn.Module):
             dropout=dropout, batch_first=True
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.pos_encoding = PositionalEncoding2D(feature_dim, max_h=100, max_w=100)
+        self.pos_encoding = PositionalEncoding2D(feature_dim, max_h=200, max_w=200)
 
     def forward(self, x):
         # x is assumed to be (Batch, Channel, Height, Width)
@@ -142,17 +142,23 @@ class TaskAwareQueryInitialization(nn.Module):
         self.recognition_query_project = nn.Linear(feature_dim, feature_dim)
 
     def forward(self, encoded_features):
-        initial_queries = self.query_embed.weight.unsqueeze(0).repeat(encoded_features.shape[0], 1, 1)
-
-        coarse_bboxes_coords = self.bbox_coord_head(initial_queries).sigmoid()
-        coarse_bboxes_scores = self.bbox_score_head(initial_queries).sigmoid()
+        B = encoded_features.shape[0]
         
-        coarse_bboxes_and_scores = torch.cat([coarse_bboxes_coords, coarse_bboxes_scores], dim=-1)
-
-        detection_queries = self.detection_query_project(initial_queries)
-        recognition_queries = self.recognition_query_project(initial_queries)
-
-        return encoded_features, detection_queries, recognition_queries, coarse_bboxes_and_scores
+        # Static query embeddings
+        initial_queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
+        
+        # 🔧 FIX: Add cross-attention with image features
+        q = initial_queries
+        k = v = encoded_features
+        attended_queries, _ = self.cross_attention(q, k, v)
+        
+        # Now predict boxes from image-aware queries
+        coarse_bboxes_coords = self.bbox_coord_head(attended_queries).sigmoid()
+        
+        detection_queries = self.detection_query_project(attended_queries)
+        recognition_queries = self.recognition_query_project(attended_queries)
+        
+        return encoded_features, detection_queries, recognition_queries, coarse_bboxes_coords
 
 # This is the "Module 1" wrapper
 class VimTSModule1(nn.Module):
