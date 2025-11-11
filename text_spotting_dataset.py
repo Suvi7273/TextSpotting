@@ -329,8 +329,8 @@ def build_vocabulary_from_text_files(gt_dir, filter_languages=None, save_vocab_p
     print(f"{'='*80}")
     print(f"Vocabulary size: {vocab_size}")
     print(f"Padding index: {padding_idx}")
-    print(f"Character mapping (first 30):")
-    for i, (char_id, char) in enumerate(list(id_to_char.items())[:30]):
+    print(f"Character mapping:")
+    for i, (char_id, char) in enumerate(list(id_to_char.items())[:]):
         print(f"  ID {char_id}: '{char}'")
     print(f"{'='*80}\n")
     
