@@ -15,8 +15,7 @@ class TextFileDataset(torch.utils.data.Dataset):
     """
     def __init__(self, gt_dir, img_dir, transform=None, 
                  max_recognition_seq_len=25, padding_value=96,
-                 char_to_id=None, filter_languages=None,
-                 require_language=None):  # NEW PARAMETER
+                 char_to_id=None, require_language=None):
         """
         Args:
             gt_dir: Directory containing ground truth .txt files
@@ -34,7 +33,6 @@ class TextFileDataset(torch.utils.data.Dataset):
         self.max_recognition_seq_len = max_recognition_seq_len
         self.padding_value = padding_value
         self.char_to_id = char_to_id
-        self.filter_languages = filter_languages if filter_languages else []
         self.require_language = require_language  # NEW
         
         # Get all txt files
@@ -59,8 +57,7 @@ class TextFileDataset(torch.utils.data.Dataset):
                     
                     language = parts[8]
                     
-                    # Skip filtered languages
-                    if language in self.filter_languages:
+                    if self.require_language and language != self.require_language:
                         continue
                     
                     has_valid_annotations = True
@@ -255,45 +252,25 @@ class TextFileDataset(torch.utils.data.Dataset):
         
         return image_tensor, target
     
-def build_vocabulary_from_text_files(gt_dir, filter_languages=None, save_vocab_path=None):
-    """
-    Build vocabulary from text annotation files.
-    
-    Args:
-        gt_dir: Directory containing ground truth .txt files
-        filter_languages: List of languages to exclude (e.g., ['Arabic'])
-        save_vocab_path: Path to save vocabulary
-    
-    Returns: id_to_char dict, char_to_id dict, vocab_size, padding_idx
-    """
-    filter_languages = filter_languages if filter_languages else []
+def build_vocabulary_from_text_files(gt_dir, required_language=None, save_vocab_path=None):
     all_chars = set()
     sample_texts = []
-    
-    # Read all text files
+
     txt_files = [f for f in os.listdir(gt_dir) if f.endswith('.txt')]
-    
-    print(f"\n{'='*80}")
-    print(f"VOCABULARY BUILDING FROM TEXT FILES")
-    print(f"{'='*80}")
-    print(f"Ground truth directory: {gt_dir}")
-    print(f"Total files: {len(txt_files)}")
-    print(f"Filtering languages: {filter_languages}")
-    
     for txt_file in txt_files:
         with open(os.path.join(gt_dir, txt_file), 'r', encoding='utf-8') as f:
             for line in f:
                 parts = line.strip().split(',')
                 if len(parts) < 10:
                     continue
-                
+
                 language = parts[8]
                 text = ','.join(parts[9:])
-                
-                # Skip filtered languages
-                if language in filter_languages:
+
+                # Only include text from the required language (if set)
+                if required_language and language != required_language:
                     continue
-                
+
                 all_chars.update(text)
                 if len(sample_texts) < 10:
                     sample_texts.append(text)
@@ -306,21 +283,16 @@ def build_vocabulary_from_text_files(gt_dir, filter_languages=None, save_vocab_p
     # Create character mapping (0-94 for printable ASCII)
     id_to_char = {}
     char_to_id = {}
-    
-    # Sort characters for consistent mapping
-    sorted_chars = sorted(list(all_chars))
-    
-    for idx, char in enumerate(sorted_chars):
-        if idx <= 94:  # Keep within 0-94 range
-            id_to_char[idx] = char
-            char_to_id[char] = idx
-    
+
+    id_to_char = {i - 32: chr(i) for i in range(32, 127)}  # 0–94 for ASCII
+    char_to_id = {chr(i): i - 32 for i in range(32, 127)}
+
     # Add special tokens
     id_to_char[95] = '<unk>'
     id_to_char[96] = '<pad>'
     char_to_id['<unk>'] = 95
     char_to_id['<pad>'] = 96
-    
+
     vocab_size = 97
     padding_idx = 96
     
