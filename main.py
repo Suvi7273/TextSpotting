@@ -15,7 +15,7 @@ import torch.nn.functional as F
 # Import modules from the separate files
 from vimts_backbone_taqi import VimTSModule1
 from vimts_decoder_heads import TaskAwareDecoder, TaskAwareDecoderLayer, PredictionHeads
-from text_spotting_dataset import TotalTextDataset, collate_fn , AdaptiveResize, AdaptiveResizeTest, build_vocabulary_from_text_files, TextFileDataset
+from text_spotting_dataset import collate_fn , AdaptiveResize, AdaptiveResizeTest, build_vocabulary_from_text_files, TextFileDataset
 from matcher import HungarianMatcher, box_cxcywh_to_xyxy 
 from detr_losses import SetCriterion 
 
