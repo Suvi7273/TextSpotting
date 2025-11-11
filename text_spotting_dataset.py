@@ -24,7 +24,6 @@ class TextFileDataset(torch.utils.data.Dataset):
             max_recognition_seq_len: Maximum sequence length for recognition
             padding_value: Padding index for recognition sequences
             char_to_id: Dictionary mapping characters to IDs
-            filter_languages: List of languages to exclude (e.g., ['Arabic'])
             require_language: If set, only include images with at least one annotation in this language (e.g., 'Latin')
         """
         self.gt_dir = gt_dir
@@ -91,7 +90,7 @@ class TextFileDataset(torch.utils.data.Dataset):
         print(f"Ground truth directory: {gt_dir}")
         print(f"Image directory: {img_dir}")
         print(f"Total annotation files found: {len(all_gt_files)}")
-        print(f"Filtering out languages: {self.filter_languages}")
+
         if self.require_language:
             print(f"Requiring language: {self.require_language}")
             print(f"  - Files WITH {self.require_language}: {len(self.gt_files)}")
@@ -181,8 +180,7 @@ class TextFileDataset(torch.utils.data.Dataset):
                 if coords is None:
                     continue
                 
-                # Filter out unwanted languages
-                if language in self.filter_languages:
+                if self.require_language and language != self.require_language:
                     continue
                 
                 # Convert polygon to normalized coordinates
