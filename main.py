@@ -423,16 +423,31 @@ if __name__ == "__main__":
 
     print(f"\nTotal parameters: {sum(p.numel() for p in model.parameters())}")
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    
+
     for batch_idx, (images, targets) in enumerate(dataloader):
-        print(batch_idx)
-        plt.imshow(images)
-        plt.show() 
+        print(f"\nBatch {batch_idx}")
+
+        # images shape: (B, 3, H, W)
+        img = images[0]  # take first image in batch
+
+        # Convert from tensor → NumPy → HWC for matplotlib
+        img = img.permute(1, 2, 0).cpu().numpy()
+
+        # Undo normalization if you applied transforms.Normalize(...)
+        # img = img * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]
+        # img = img.clip(0, 1)
+
+        plt.imshow(img)
+        plt.title(f"Batch {batch_idx}")
+        plt.axis("off")
+        plt.show()
+
+        print("Targets:")
         print(targets)
         print()
-        
-        if(batch_idx==2):
-            break
+
+        if batch_idx >= 2:
+            break  # stop after a few batches
 
     # --- Training Loop ---
     print("\nStarting DETR-style training loop...")
