@@ -298,32 +298,6 @@ if __name__ == "__main__":
     dataset = FilteredDataset(base_dataset, min_text_length=2)
 
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, collate_fn=collate_fn)
-    
-    # --- IMPORTANT: Check data quality ---
-    print("\n" + "="*80)
-    print("DATA QUALITY CHECK")
-    print("="*80)
-
-    # Check a few samples
-    for i in range(min(3, len(dataset))):
-        img, target = dataset[i]
-        print(f"\nSample {i}:")
-        print(f"  Image shape: {img.shape}")
-        print(f"  Num boxes: {len(target['boxes'])}")
-        print(f"  Num polygons: {len(target['polygons'])}")
-        print(f"  Num recognition seqs: {len(target['recognition'])}")
-        
-        # Check recognition quality
-        if len(target['recognition']) > 0:
-            for j, rec_seq in enumerate(target['recognition'][:3]):
-                non_padding = (rec_seq != PADDING_IDX).sum().item()
-                print(f"    Recognition {j}: {non_padding} non-padding tokens")
-                # Decode
-                text = ''.join([id_to_char.get(cid.item(), '?') 
-                            for cid in rec_seq if cid.item() != PADDING_IDX])
-                print(f"      Text: '{text}'")
-
-    print("="*80 + "\n")
 
     USE_ADAPTER = True
     FREEZE_BACKBONE = False  # For initial training, keep backbone trainable with lower LR
@@ -449,6 +423,16 @@ if __name__ == "__main__":
 
     print(f"\nTotal parameters: {sum(p.numel() for p in model.parameters())}")
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    
+    for batch_idx, (images, targets) in enumerate(dataloader):
+        print(batch_idx)
+        plt.imshow(images)
+        plt.show() 
+        print(targets)
+        print()
+        
+        if(batch_idx==2):
+            break
 
     # --- Training Loop ---
     print("\nStarting DETR-style training loop...")
@@ -458,7 +442,7 @@ if __name__ == "__main__":
         total_epoch_loss = 0
         
         optimizer.zero_grad()
-        
+
         for batch_idx, (images, targets) in enumerate(dataloader):
             images = images.to(device)
             # targets is a list of dictionaries (even for batch_size=1)
