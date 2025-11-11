@@ -438,8 +438,9 @@ if __name__ == "__main__":
         # img = img.clip(0, 1)
 
         plt.imshow(img)
-        plt.title(f"Batch {batch_idx}")
-        plt.axis("off")
+        save_path = f"batch_{batch_idx}.png"
+        plt.savefig(save_path)
+        print(f"Saved image to: {save_path}")
         plt.show()
 
         print("Targets:")

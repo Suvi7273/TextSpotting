@@ -294,29 +294,6 @@ def build_vocabulary_from_text_files(gt_dir, required_language=None, save_vocab_
     vocab_size = 97
     padding_idx = 96
     
-    print(f"\n{'='*80}")
-    print(f"VOCABULARY SUMMARY")
-    print(f"{'='*80}")
-    print(f"Vocabulary size: {vocab_size}")
-    print(f"Padding index: {padding_idx}")
-    print(f"Character mapping:")
-    for i, (char_id, char) in enumerate(list(id_to_char.items())[:]):
-        print(f"  ID {char_id}: '{char}'")
-    print(f"{'='*80}\n")
-    
-    # Save vocabulary
-    if save_vocab_path:
-        vocab_data = {
-            'id_to_char': id_to_char,
-            'char_to_id': char_to_id,
-            'vocab_size': vocab_size,
-            'padding_idx': padding_idx
-        }
-        import pickle
-        with open(save_vocab_path, 'wb') as f:
-            pickle.dump(vocab_data, f)
-        print(f"Vocabulary saved to {save_vocab_path}")
-    
     return id_to_char, char_to_id, vocab_size, padding_idx
 
 class AdaptiveResize:
