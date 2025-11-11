@@ -333,7 +333,7 @@ if __name__ == "__main__":
 
     # --- Initialize Full Model ---
     model = VimTSFullModel(
-        resnet_pretrained=False,  # IMPORTANT: Use pretrained backbone
+        resnet_pretrained=True,  # IMPORTANT: Use pretrained backbone
         rem_in_channels=1024,
         rem_out_channels=FEATURE_DIM,
         transformer_feature_dim=FEATURE_DIM,
