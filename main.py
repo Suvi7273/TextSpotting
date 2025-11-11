@@ -255,13 +255,14 @@ if __name__ == "__main__":
 
     transform_train = ComposeWithTarget([
         AdaptiveResize(min_size=640, max_size=896, max_long_side=1600),
-        transforms.ColorJitter(...),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.ToTensor(),
-        transforms.Normalize(...)
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
     transform_test = ComposeWithTarget([
         AdaptiveResizeTest(shorter_size=1000, max_long_side=1824),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
