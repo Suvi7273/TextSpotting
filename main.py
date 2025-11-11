@@ -240,14 +240,27 @@ if __name__ == "__main__":
     WARMUP_EPOCHS = 5  # Add warmup
 
     # Data augmentation for training
-    transform_train = transforms.Compose([
+    class ComposeWithTarget:
+        def __init__(self, transforms):
+            self.transforms = transforms
+
+        def __call__(self, img, target):
+            for t in self.transforms:
+                # Pass both if the transform supports targets
+                try:
+                    img, target = t(img, target)
+                except TypeError:
+                    img = t(img)
+            return img, target
+
+    transform_train = ComposeWithTarget([
         AdaptiveResize(min_size=640, max_size=896, max_long_side=1600),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),  # Add augmentation
+        transforms.ColorJitter(...),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(...)
     ])
 
-    transform_test = transforms.Compose([
+    transform_test = ComposeWithTarget([
         AdaptiveResizeTest(shorter_size=1000, max_long_side=1824),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -306,7 +319,7 @@ if __name__ == "__main__":
 
     # --- Initialize Full Model ---
     model = VimTSFullModel(
-        resnet_pretrained=True,  # IMPORTANT: Use pretrained backbone
+        resnet_pretrained=False,
         rem_in_channels=1024,
         rem_out_channels=FEATURE_DIM,
         transformer_feature_dim=FEATURE_DIM,
@@ -423,32 +436,6 @@ if __name__ == "__main__":
 
     print(f"\nTotal parameters: {sum(p.numel() for p in model.parameters())}")
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-
-    for batch_idx, (images, targets) in enumerate(dataloader):
-        print(f"\nBatch {batch_idx}")
-
-        # images shape: (B, 3, H, W)
-        img = images[0]  # take first image in batch
-
-        # Convert from tensor → NumPy → HWC for matplotlib
-        img = img.permute(1, 2, 0).cpu().numpy()
-
-        # Undo normalization if you applied transforms.Normalize(...)
-        # img = img * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]
-        # img = img.clip(0, 1)
-
-        plt.imshow(img)
-        save_path = f"batch_{batch_idx}.png"
-        plt.savefig(save_path)
-        print(f"Saved image to: {save_path}")
-        plt.show()
-
-        print("Targets:")
-        print(targets)
-        print()
-
-        if batch_idx >= 2:
-            break  # stop after a few batches
 
     # --- Training Loop ---
     print("\nStarting DETR-style training loop...")

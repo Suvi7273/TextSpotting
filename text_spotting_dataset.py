@@ -228,8 +228,13 @@ class TextFileDataset(torch.utils.data.Dataset):
         gt_recs_tensor = torch.stack(gt_recs) if gt_recs else torch.empty((0, self.max_recognition_seq_len), dtype=torch.long)
         
         # Apply image transformations
-        if self.transform:
-            image_tensor = self.transform(image)
+        if self.transform is not None:
+            # Allow transform to handle both image and annotations
+            transform_out = self.transform(img, target)
+            if isinstance(transform_out, tuple):
+                img, target = transform_out
+            else:
+                img = transform_out  # backward compatible
         else:
             image_tensor = transforms.ToTensor()(image)
         
@@ -297,60 +302,77 @@ def build_vocabulary_from_text_files(gt_dir, required_language=None, save_vocab_
     return id_to_char, char_to_id, vocab_size, padding_idx
 
 class AdaptiveResize:
-    """
-    Adaptive resizing that maintains aspect ratio.
-    Shorter side is resized to range [min_size, max_size], 
-    and longer side is capped at max_long_side.
-    Used during training for data augmentation.
-    """
     def __init__(self, min_size=640, max_size=896, max_long_side=1600):
         self.min_size = min_size
         self.max_size = max_size
         self.max_long_side = max_long_side
-    
-    def __call__(self, img):
+
+    def __call__(self, img, target=None):
         w, h = img.size
         shorter_side = min(w, h)
         longer_side = max(w, h)
-        
-        # Randomly choose target size for shorter side during training
+
         target_shorter = random.randint(self.min_size, self.max_size)
         scale = target_shorter / shorter_side
-        
+
         new_w = int(w * scale)
         new_h = int(h * scale)
-        
-        # Cap the longer side
+
         if max(new_w, new_h) > self.max_long_side:
             scale = self.max_long_side / max(new_w, new_h)
             new_w = int(new_w * scale)
             new_h = int(new_h * scale)
-        
-        return img.resize((new_w, new_h), Image.BILINEAR)
 
+        img = img.resize((new_w, new_h), Image.BILINEAR)
+
+        # --- scale the target boxes/polygons if provided ---
+        if target is not None:
+            if "boxes" in target:
+                target["boxes"][:, :4] *= scale  # assuming absolute coordinates (x, y, w, h)
+            if "polygons" in target:
+                target["polygons"] *= scale
+
+            target["scale"] = scale
+            return img, target
+
+        return img
 
 class AdaptiveResizeTest:
     """
-    Fixed resizing for testing/inference - uses fixed shorter side size.
+    Fixed resizing for testing/inference - resizes both image and annotations.
     """
     def __init__(self, shorter_size=1000, max_long_side=1824):
         self.shorter_size = shorter_size
         self.max_long_side = max_long_side
-    
-    def __call__(self, img):
+
+    def __call__(self, img, target=None):
         w, h = img.size
         shorter_side = min(w, h)
         scale = self.shorter_size / shorter_side
-        
+
         new_w = int(w * scale)
         new_h = int(h * scale)
-        
+
+        # Cap the longer side if needed
         if max(new_w, new_h) > self.max_long_side:
             scale = self.max_long_side / max(new_w, new_h)
             new_w = int(new_w * scale)
             new_h = int(new_h * scale)
-        
-        return img.resize((new_w, new_h), Image.BILINEAR)
+
+        img = img.resize((new_w, new_h), Image.BILINEAR)
+
+        # --- scale the target boxes/polygons if provided ---
+        if target is not None:
+            if "boxes" in target:
+                target["boxes"][:, :4] *= scale  # (cx, cy, w, h) or (x_min, y_min, x_max, y_max)
+            if "polygons" in target:
+                target["polygons"] *= scale
+
+            target["scale"] = scale
+            return img, target
+
+        return img
+
 
 def collate_fn(batch):
     """
