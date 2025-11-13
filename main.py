@@ -287,7 +287,7 @@ if __name__ == "__main__":
 
     # Training parameters
     BATCH_SIZE = 1
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = 5e-5
     NUM_EPOCHS = 50
     WARMUP_EPOCHS = 5
 
@@ -471,22 +471,22 @@ if __name__ == "__main__":
 
     optimizer = optim.AdamW(param_groups, lr=LEARNING_RATE, weight_decay=1e-4)
 
-    # Learning rate scheduler with warmup
-    def get_lr_scheduler_with_warmup(optimizer, warmup_epochs, total_epochs):
+    def get_stable_lr_scheduler(optimizer, warmup_epochs, total_epochs):
         def lr_lambda(epoch):
             if epoch < warmup_epochs:
                 return (epoch + 1) / warmup_epochs
             else:
+                # Slower decay
                 progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
-                return 0.5 * (1 + math.cos(math.pi * progress))
+                return max(0.1, 0.5 * (1 + math.cos(math.pi * progress)))  # Min LR = 10%
         
         return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    scheduler = get_lr_scheduler_with_warmup(optimizer, WARMUP_EPOCHS, NUM_EPOCHS)
+    scheduler = get_stable_lr_scheduler(optimizer, WARMUP_EPOCHS, NUM_EPOCHS)
 
     # Gradient accumulation and clipping
     ACCUMULATION_STEPS = 4
-    MAX_GRAD_NORM = 0.1
+    MAX_GRAD_NORM = 0.5
 
     from torch.cuda.amp import autocast, GradScaler
     scaler = GradScaler()
@@ -634,9 +634,15 @@ if __name__ == "__main__":
 
     # Reshape back to spatial dimensions for visualization
     B, HW, C = encoded_features.shape
-    H = W = int(math.sqrt(HW))  # Approximate square dimensions
-    encoded_features_spatial = encoded_features[0].reshape(H, W, C).permute(2, 0, 1).cpu().numpy()  # (1024, H, W)
+    # Get actual spatial dimensions from REM output
+    with torch.no_grad():
+        resnet_features = model.module1.resnet_backbone(image_tensor_viz)
+        rem_features = model.module1.receptive_enhancement_module(resnet_features)
+        _, _, H, W = rem_features.shape  # Get actual H and W
+    print(f"Encoded features: {encoded_features.shape}, H={H}, W={W}, H*W={H*W}")
 
+    # Reshape using actual dimensions
+    encoded_features_spatial = encoded_features[0].reshape(H, W, C).permute(2, 0, 1).cpu().numpy()  # (1024, H, W)
     # Visualize last 16 channels
     fig, axes = plt.subplots(4, 4, figsize=(12, 12))
 
