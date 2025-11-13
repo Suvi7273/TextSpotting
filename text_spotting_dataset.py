@@ -32,13 +32,13 @@ class TextFileDataset(torch.utils.data.Dataset):
         self.max_recognition_seq_len = max_recognition_seq_len
         self.padding_value = padding_value
         self.char_to_id = char_to_id
-        self.require_language = require_language  # NEW
+        self.require_language = require_language
         
         # Get all txt files
         all_gt_files = [f for f in os.listdir(gt_dir) if f.endswith('.txt')]
         all_gt_files.sort()
         
-        # NEW: Filter files based on language requirements
+        # Filter files based on language requirements
         self.gt_files = []
         skipped_no_latin = 0
         skipped_no_annotations = 0
@@ -65,9 +65,9 @@ class TextFileDataset(torch.utils.data.Dataset):
                     if self.require_language:
                         if language == self.require_language:
                             has_required_language = True
-                            break  # Found required language, no need to continue
+                            break
                     else:
-                        has_required_language = True  # No requirement, accept all
+                        has_required_language = True
             
             # Include file only if it meets requirements
             if self.require_language:
@@ -227,31 +227,38 @@ class TextFileDataset(torch.utils.data.Dataset):
         gt_labels_tensor = torch.tensor(gt_labels, dtype=torch.long) if gt_labels else torch.empty((0,), dtype=torch.long)
         gt_recs_tensor = torch.stack(gt_recs) if gt_recs else torch.empty((0, self.max_recognition_seq_len), dtype=torch.long)
         
-        # Apply image transformations
-        if self.transform is not None:
-            # Allow transform to handle both image and annotations
-            transform_out = self.transform(img, target)
-            if isinstance(transform_out, tuple):
-                img, target = transform_out
-            else:
-                img = transform_out  # backward compatible
-        else:
-            image_tensor = transforms.ToTensor()(image)
-        
-        # Create target dictionary
+        # Create target dictionary BEFORE applying transforms
         target = {
             'image_id': idx,
             'file_name': img_filename,
             'original_size': torch.tensor([original_height, original_width]),
-            'size': torch.tensor(image_tensor.shape[-2:]),
+            'size': torch.tensor([original_height, original_width]),  # Will be updated by transform
             'boxes': gt_bboxes_tensor,
             'labels': gt_labels_tensor,
             'recognition': gt_recs_tensor,
             'polygons': gt_polygons,
             'area': torch.tensor([bbox[2] * bbox[3] * original_width * original_height 
-                                 for bbox in gt_bboxes], dtype=torch.float32),
-            'iscrowd': torch.zeros(len(gt_bboxes), dtype=torch.bool)
+                                 for bbox in gt_bboxes], dtype=torch.float32) if gt_bboxes else torch.tensor([], dtype=torch.float32),
+            'iscrowd': torch.zeros(len(gt_bboxes), dtype=torch.bool) if gt_bboxes else torch.tensor([], dtype=torch.bool)
         }
+        
+        # Apply image transformations
+        if self.transform is not None:
+            # Try to apply transform with target, fall back to image-only if it fails
+            try:
+                transform_out = self.transform(image, target)
+                if isinstance(transform_out, tuple):
+                    image_tensor, target = transform_out
+                else:
+                    image_tensor = transform_out
+            except TypeError:
+                # Transform doesn't support target, apply to image only
+                image_tensor = self.transform(image)
+        else:
+            image_tensor = transforms.ToTensor()(image)
+        
+        # Update size in target to match transformed image
+        target['size'] = torch.tensor(image_tensor.shape[-2:])
         
         return image_tensor, target
     
@@ -325,13 +332,9 @@ class AdaptiveResize:
 
         img = img.resize((new_w, new_h), Image.BILINEAR)
 
-        # --- scale the target boxes/polygons if provided ---
+        # Update target with new size if provided
         if target is not None:
-            if "boxes" in target:
-                target["boxes"][:, :4] *= scale  # assuming absolute coordinates (x, y, w, h)
-            if "polygons" in target:
-                target["polygons"] *= scale
-
+            target["size"] = torch.tensor([new_h, new_w])
             target["scale"] = scale
             return img, target
 
@@ -361,13 +364,9 @@ class AdaptiveResizeTest:
 
         img = img.resize((new_w, new_h), Image.BILINEAR)
 
-        # --- scale the target boxes/polygons if provided ---
+        # Update target with new size if provided
         if target is not None:
-            if "boxes" in target:
-                target["boxes"][:, :4] *= scale  # (cx, cy, w, h) or (x_min, y_min, x_max, y_max)
-            if "polygons" in target:
-                target["polygons"] *= scale
-
+            target["size"] = torch.tensor([new_h, new_w])
             target["scale"] = scale
             return img, target
 

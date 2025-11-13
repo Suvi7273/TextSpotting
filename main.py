@@ -74,11 +74,6 @@ class VimTSFullModel(nn.Module):
         detection_queries = module1_output["detection_queries"]
         recognition_queries = module1_output["recognition_queries"]
 
-        # Ensure detection and recognition queries are of same num_queries for now,
-        # so matcher can handle. The paper suggests they might be the same set.
-        # If not, matcher needs to be adapted for matching text instance detection + text instance recognition.
-        # For now, let's assume num_detection_queries == num_recognition_queries == self.num_queries
-        
         refined_detection_queries, refined_recognition_queries, _ = self.decoder(
             detection_queries, recognition_queries, encoded_image_features
         )
@@ -233,41 +228,58 @@ if __name__ == "__main__":
     MAX_RECOGNITION_SEQ_LEN = 25 
     NUM_POLYGON_POINTS = 16 
 
-    # Training parameters - IMPROVED
+    # Training parameters
     BATCH_SIZE = 1
     LEARNING_RATE = 1e-4
     NUM_EPOCHS = 100
-    WARMUP_EPOCHS = 5  # Add warmup
+    WARMUP_EPOCHS = 5
 
-    # Data augmentation for training
-    class ComposeWithTarget:
-        def __init__(self, transforms):
-            self.transforms = transforms
+    # Custom transform composition that properly handles targets
+    class TransformCompose:
+        def __init__(self, transforms_list):
+            self.transforms = transforms_list
 
         def __call__(self, img, target):
             for t in self.transforms:
-                # Pass both if the transform supports targets
-                try:
+                if isinstance(t, (AdaptiveResize, AdaptiveResizeTest)):
+                    # These transforms handle targets
                     img, target = t(img, target)
-                except TypeError:
+                elif isinstance(t, transforms.ColorJitter):
+                    # ColorJitter only handles images
                     img = t(img)
+                elif isinstance(t, transforms.ToTensor):
+                    # ToTensor only handles images
+                    img = t(img)
+                elif isinstance(t, transforms.Normalize):
+                    # Normalize only handles images
+                    img = t(img)
+                else:
+                    # Try to apply with target, fall back to image only
+                    try:
+                        result = t(img, target)
+                        if isinstance(result, tuple):
+                            img, target = result
+                        else:
+                            img = result
+                    except TypeError:
+                        img = t(img)
             return img, target
 
-    transform_train = ComposeWithTarget([
+    # Data augmentation for training
+    transform_train = TransformCompose([
         AdaptiveResize(min_size=640, max_size=896, max_long_side=1600),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    transform_test = ComposeWithTarget([
+    transform_test = TransformCompose([
         AdaptiveResizeTest(shorter_size=1000, max_long_side=1824),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
-    # IMPORTANT: Filter out samples with no meaningful text during training
+    # Filter dataset to only meaningful text
     class FilteredDataset(torch.utils.data.Dataset):
         def __init__(self, base_dataset, min_text_length=1):
             self.base_dataset = base_dataset
@@ -305,16 +317,16 @@ if __name__ == "__main__":
         max_recognition_seq_len=MAX_RECOGNITION_SEQ_LEN,
         padding_value=PADDING_IDX,
         char_to_id=char_to_id,
-        require_language='Latin'           # Only include images with Latin text
+        require_language='Latin'
     )
 
-    # Apply the FilteredDataset wrapper if needed
+    # Apply the FilteredDataset wrapper
     dataset = FilteredDataset(base_dataset, min_text_length=2)
 
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, collate_fn=collate_fn)
 
     USE_ADAPTER = True
-    FREEZE_BACKBONE = False  # For initial training, keep backbone trainable with lower LR
+    FREEZE_BACKBONE = False
     USE_PQGM = False
     TASK_ID = 0
 
@@ -337,7 +349,7 @@ if __name__ == "__main__":
         task_id=TASK_ID
     ).to(device)
 
-    # --- IMPROVED: Use different learning rates for backbone vs new layers ---
+    # Use different learning rates for backbone vs new layers
     backbone_params = []
     new_params = []
 
@@ -348,13 +360,13 @@ if __name__ == "__main__":
             new_params.append(param)
 
     param_groups = [
-        {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},  # 10x lower LR for backbone
+        {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},
         {'params': new_params, 'lr': LEARNING_RATE}
     ]
 
-    # --- Initialize DETR Criterion and Matcher ---
+    # Initialize DETR Criterion and Matcher
     matcher = HungarianMatcher(
-        cost_class=2,  # Increased from 1
+        cost_class=2,
         cost_bbox=5,
         cost_giou=2,
         cost_recognition=2,
@@ -363,34 +375,23 @@ if __name__ == "__main__":
         padding_idx=PADDING_IDX
     )
 
-    # IMPROVED: Adjust loss weights based on task importance
     weight_dict = {
-        'loss_ce': 2.0,          # Classification
-        'loss_bbox': 5.0,        # Bounding box L1 (part of 'boxes' loss)
-        'loss_giou': 2.0,        # GIoU (part of 'boxes' loss)
-        'loss_recognition': 3.0, # Recognition
-        'loss_cardinality': 1.0, # Cardinality
-        'loss_polygon': 1.0      # Polygon
+        'loss_ce': 2.0,
+        'loss_bbox': 5.0,
+        'loss_giou': 2.0,
+        'loss_recognition': 3.0,
+        'loss_cardinality': 1.0,
+        'loss_polygon': 1.0
     }
 
-    # IMPORTANT FIX: The loss names in losses_to_compute must match the methods in SetCriterion
-    # The SetCriterion has these loss methods:
-    #   - 'labels' -> computes loss_ce (classification)
-    #   - 'boxes' -> computes loss_bbox AND loss_giou
-    #   - 'cardinality' -> computes loss_cardinality
-    #   - 'polygons' -> computes loss_polygon
-    #   - 'recognition' -> computes loss_recognition
-
-    # CORRECT: Use the method names, not the individual loss component names
     losses_to_compute = ['labels', 'boxes', 'cardinality', 'polygons']
 
     # Add recognition only if you have good quality data
-    if len(dataset) > len(base_dataset) * 0.3:  # If >30% have meaningful text
+    if len(dataset) > len(base_dataset) * 0.3:
         losses_to_compute.append('recognition')
         print("\nIncluding recognition loss in training")
     else:
         print("\nSkipping recognition loss due to insufficient text data")
-        # Remove recognition from weight_dict if not using it
         weight_dict.pop('loss_recognition', None)
 
     print(f"Losses to compute: {losses_to_compute}")
@@ -402,7 +403,7 @@ if __name__ == "__main__":
         matcher=matcher,
         weight_dict=weight_dict,
         eos_coef=eos_coef,
-        losses=losses_to_compute,  # Pass the correct loss method names
+        losses=losses_to_compute,
         vocab_size=VOCAB_SIZE,
         max_seq_len=MAX_RECOGNITION_SEQ_LEN,
         padding_idx=PADDING_IDX
@@ -413,14 +414,12 @@ if __name__ == "__main__":
 
     optimizer = optim.AdamW(param_groups, lr=LEARNING_RATE, weight_decay=1e-4)
 
-    # IMPROVED: Learning rate scheduler with warmup
+    # Learning rate scheduler with warmup
     def get_lr_scheduler_with_warmup(optimizer, warmup_epochs, total_epochs):
         def lr_lambda(epoch):
             if epoch < warmup_epochs:
-                # Linear warmup
                 return (epoch + 1) / warmup_epochs
             else:
-                # Cosine annealing after warmup
                 progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
                 return 0.5 * (1 + math.cos(math.pi * progress))
         
@@ -441,7 +440,7 @@ if __name__ == "__main__":
     # --- Training Loop ---
     print("\nStarting DETR-style training loop...")
     for epoch in range(NUM_EPOCHS):
-        model.train() # Set model to training mode
+        model.train()
         criterion.train()
         total_epoch_loss = 0
         
@@ -449,15 +448,13 @@ if __name__ == "__main__":
 
         for batch_idx, (images, targets) in enumerate(dataloader):
             images = images.to(device)
-            # targets is a list of dictionaries (even for batch_size=1)
-            # Move individual tensors within target dicts to device
             targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
 
             with autocast():
                 predictions = model(images)
                 loss_dict = criterion(predictions, targets)
                 
-                # Check if loss_dict contains any NaN or Inf
+                # Check for invalid loss values
                 loss_values_valid = all(not (torch.isnan(v).any() or torch.isinf(v).any()) 
                                        for v in loss_dict.values() if isinstance(v, torch.Tensor))
                 
@@ -466,12 +463,11 @@ if __name__ == "__main__":
                     for k, v in loss_dict.items():
                         if isinstance(v, torch.Tensor):
                             print(f"  {k}: NaN={torch.isnan(v).any()}, Inf={torch.isinf(v).any()}")
-                    continue  # Skip this batch
+                    continue
                 
                 loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
-                loss = loss / ACCUMULATION_STEPS  # Normalize loss
+                loss = loss / ACCUMULATION_STEPS
             
-            # Check if loss is valid before backward
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"Warning: Invalid total loss at epoch {epoch+1}, batch {batch_idx+1}. Skipping.")
                 continue
@@ -479,7 +475,6 @@ if __name__ == "__main__":
             scaler.scale(loss).backward()
             
             if (batch_idx + 1) % ACCUMULATION_STEPS == 0:
-                # Unscale gradients and clip
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
                 
@@ -559,7 +554,6 @@ if __name__ == "__main__":
 
     original_image_full_path = os.path.join(IMAGE_DIR, gt_info_viz['file_name'])
 
-    # Use lower threshold to see all detections
     visualize_output(
         original_image_full_path, 
         output_viz, 
@@ -568,7 +562,7 @@ if __name__ == "__main__":
         padding_idx=PADDING_IDX,
         show_gt=True, 
         show_preds=True, 
-        score_threshold=0.01,  # Very low threshold to see all predictions
+        score_threshold=0.01,
         max_preds=100
     )
 
