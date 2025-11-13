@@ -514,8 +514,8 @@ if __name__ == "__main__":
                 loss_dict = criterion(predictions, targets)
                 
                 # Print detailed breakdown every 10 batches
-                if batch_idx % 10 == 0:
-                    print_loss_breakdown(loss_dict, weight_dict)
+                # if batch_idx % 10 == 0:
+                #     print_loss_breakdown(loss_dict, weight_dict)
                 
                 # Check for invalid loss values
                 loss_values_valid = all(not (torch.isnan(v).any() or torch.isinf(v).any()) 
@@ -588,6 +588,40 @@ if __name__ == "__main__":
         }
     }, checkpoint_path)
     print(f"Model saved to {checkpoint_path}")
+
+    # --- Visualize ResNet Feature Maps ---
+    print("\nVisualizing ResNet backbone output...")
+    model.eval()
+
+    # Get a sample image
+    sample_idx = random.randint(0, len(dataset) - 1)
+    image_tensor_viz, gt_info_viz = dataset[sample_idx]
+
+    if image_tensor_viz.dim() == 3:
+        image_tensor_viz = image_tensor_viz.unsqueeze(0)
+    image_tensor_viz = image_tensor_viz.to(device)
+
+    with torch.no_grad():
+        # Get ResNet features (1024 channels, H/16, W/16)
+        resnet_features = model.module1.resnet_backbone(image_tensor_viz)
+
+    # Visualize first 16 feature channels
+    fig, axes = plt.subplots(4, 4, figsize=(12, 12))
+    resnet_features_np = resnet_features[0].cpu().numpy()  # (1024, H, W)
+
+    for idx, ax in enumerate(axes.flat):
+        # Show feature map for channel idx
+        feature_map = resnet_features_np[idx]
+        im = ax.imshow(feature_map, cmap='viridis')
+        ax.axis('off')
+        ax.set_title(f'Ch {idx}', fontsize=8)
+
+    plt.suptitle(f'ResNet50 Feature Maps (16/{resnet_features_np.shape[0]} channels)\nImage: {gt_info_viz["file_name"]}', 
+                fontsize=12, weight='bold')
+    plt.tight_layout()
+    plt.savefig('resnet_features.png', dpi=150, bbox_inches='tight')
+    print("Saved ResNet features visualization to 'resnet_features.png'")
+    plt.show()
 
     # --- After training, visualize results ---
     print("\nRunning inference on a sample...")
