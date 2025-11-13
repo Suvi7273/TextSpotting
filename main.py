@@ -408,26 +408,29 @@ if __name__ == "__main__":
 
     # Use different learning rates for backbone vs new layers
     backbone_params = []
-    new_params = []
+    transformer_encoder_params = []
+    other_new_params = []
 
     for name, param in model.named_parameters():
         if 'resnet_backbone' in name:
             backbone_params.append(param)
+        elif 'transformer_encoder' in name:
+            transformer_encoder_params.append(param)
         else:
-            new_params.append(param)
+            other_new_params.append(param)
 
     param_groups = [
         {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},
-        {'params': new_params, 'lr': LEARNING_RATE},
-        {'params': model.module1.transformer_encoder.parameters(), 'lr': LEARNING_RATE * 2}  # Higher LR for encoder
+        {'params': transformer_encoder_params, 'lr': LEARNING_RATE * 2},  # Higher LR for encoder
+        {'params': other_new_params, 'lr': LEARNING_RATE}
     ]
 
     # Initialize DETR Criterion and Matcher
     matcher = HungarianMatcher(
-        cost_class=2,        # Increase - classification is important!
+        cost_class=2,
         cost_bbox=5,
         cost_giou=2,
-        cost_recognition=0.5,  # Decrease - too dominant
+        cost_recognition=0.5,
         vocab_size=VOCAB_SIZE,
         max_seq_len=MAX_RECOGNITION_SEQ_LEN,
         padding_idx=PADDING_IDX
@@ -437,7 +440,7 @@ if __name__ == "__main__":
         'loss_ce': 2.0,
         'loss_bbox': 5.0,
         'loss_giou': 2.0,
-        'loss_recognition': 0.5,  # Reduce recognition weight
+        'loss_recognition': 0.5,
         'loss_cardinality': 1.0,
         'loss_polygon': 0.5
     }
@@ -469,6 +472,13 @@ if __name__ == "__main__":
 
     print(f"\nCriterion initialized with losses: {losses_to_compute}")
     print(f"Loss weights: {weight_dict}")
+
+    # Print parameter group info
+    print(f"\n Parameter Groups:")
+    print(f"  Backbone params: {len(backbone_params)}")
+    print(f"  Transformer encoder params: {len(transformer_encoder_params)}")
+    print(f"  Other new params: {len(other_new_params)}")
+    print(f"  Total: {len(backbone_params) + len(transformer_encoder_params) + len(other_new_params)}")
 
     optimizer = optim.AdamW(param_groups, lr=LEARNING_RATE, weight_decay=1e-4)
 
