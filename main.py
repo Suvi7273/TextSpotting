@@ -623,6 +623,37 @@ if __name__ == "__main__":
     plt.savefig('resnet_features.png', dpi=150, bbox_inches='tight')
     print("Saved ResNet features visualization to 'resnet_features.png'")
     plt.show()
+    
+    # --- Visualize Transformer Encoder Output ---
+    print("\nVisualizing Transformer Encoder output...")
+
+    with torch.no_grad():
+        # Get full Module1 output
+        module1_output = model.module1(image_tensor_viz)
+        encoded_features = module1_output["encoded_image_features"]  # (B, H*W, 1024)
+
+    # Reshape back to spatial dimensions for visualization
+    B, HW, C = encoded_features.shape
+    H = W = int(math.sqrt(HW))  # Approximate square dimensions
+    encoded_features_spatial = encoded_features[0].reshape(H, W, C).permute(2, 0, 1).cpu().numpy()  # (1024, H, W)
+
+    # Visualize last 16 channels
+    fig, axes = plt.subplots(4, 4, figsize=(12, 12))
+
+    for idx, ax in enumerate(axes.flat):
+        # Show LAST 16 channels (most refined features)
+        channel_idx = encoded_features_spatial.shape[0] - 16 + idx
+        feature_map = encoded_features_spatial[channel_idx]
+        im = ax.imshow(feature_map, cmap='viridis')
+        ax.axis('off')
+        ax.set_title(f'Ch {channel_idx}', fontsize=8)
+
+    plt.suptitle(f'Transformer Encoder Output (Last 16/{C} channels)\nImage: {gt_info_viz["file_name"]}', 
+                fontsize=12, weight='bold')
+    plt.tight_layout()
+    plt.savefig('transformer_encoder_features.png', dpi=150, bbox_inches='tight')
+    print("Saved Transformer Encoder features to 'transformer_encoder_features.png'")
+    plt.show()
 
     # --- After training, visualize results ---
     print("\nRunning inference on a sample...")
