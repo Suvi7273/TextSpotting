@@ -495,6 +495,7 @@ if __name__ == "__main__":
     print(f"\nTotal parameters: {sum(p.numel() for p in model.parameters())}")
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
+    L=[]
     # --- Training Loop ---
     print("\nStarting DETR-style training loop...")
     for epoch in range(NUM_EPOCHS):
@@ -566,9 +567,11 @@ if __name__ == "__main__":
         
         scheduler.step()
 
+        L.append(total_epoch_loss / len(dataloader))
         print(f"Epoch {epoch+1} finished, Average Total Loss: {total_epoch_loss / len(dataloader):.4f}")
 
     print("\nDETR-style training finished.")
+    print("Loss trend over epochs:", L)
     
     # Save model checkpoint
     checkpoint_path = '/content/vimts_model_checkpoint.pth'

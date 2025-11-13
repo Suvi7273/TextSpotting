@@ -47,6 +47,10 @@ class ReceptiveEnhancementModule(nn.Module):
         return self.relu(self.bn(self.conv(x)))
 
 class PositionalEncoding2D(nn.Module):
+    """
+    2D Positional Encoding for spatial features.
+    Uses sine and cosine functions of different frequencies.
+    """
     def __init__(self, d_model, temperature=10000):
         super().__init__()
         self.d_model = d_model
@@ -58,7 +62,7 @@ class PositionalEncoding2D(nn.Module):
         Returns: (B, H*W, C) with positional encoding added
         """
         B, HW, C = x.shape
-        assert HW == h * w
+        assert HW == h * w, f"Shape mismatch: HW={HW}, h*w={h*w}"
         
         # Create position indices
         y_pos = torch.arange(h, dtype=torch.float32, device=x.device)
@@ -83,12 +87,18 @@ class PositionalEncoding2D(nn.Module):
         pos_x = x_pos[:, None] / dim_t
         pos_x = torch.stack([pos_x[:, 0::2].sin(), pos_x[:, 1::2].cos()], dim=2).flatten(1)
         
-        # Concatenate
+        # Concatenate and pad if necessary
         pos = torch.cat([pos_y, pos_x], dim=1)  # (H*W, C)
+        
+        # Handle odd dimensions
+        if pos.shape[1] < C:
+            pos = torch.cat([pos, torch.zeros(HW, C - pos.shape[1], device=x.device)], dim=1)
+        elif pos.shape[1] > C:
+            pos = pos[:, :C]
         
         # Add to features
         return x + pos.unsqueeze(0)
-    
+
 
 class TransformerEncoder(nn.Module):
     """
@@ -102,15 +112,14 @@ class TransformerEncoder(nn.Module):
             dropout=dropout, batch_first=True
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.pos_encoding = PositionalEncoding2D(feature_dim, max_h=200, max_w=200)
+        self.pos_encoding = PositionalEncoding2D(feature_dim)  # Remove max_h, max_w parameters
 
     def forward(self, x):
         # x is assumed to be (Batch, Channel, Height, Width)
         b, c, h, w = x.shape
         x = x.flatten(2).permute(0, 2, 1) # Reshape to (B, H*W, C) for Transformer
         
-        # In a real implementation, you'd add positional embeddings here
-        # E.g., x = x + self.pos_embed(h, w)
+        # Add positional encoding
         x = self.pos_encoding(x, h, w)  # Add positional encoding
         
         output = self.transformer_encoder(x)
