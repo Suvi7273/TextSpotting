@@ -287,9 +287,9 @@ if __name__ == "__main__":
 
     # Training parameters
     BATCH_SIZE = 1
-    LEARNING_RATE = 5e-5
+    LEARNING_RATE = 1e-4
     NUM_EPOCHS = 50
-    WARMUP_EPOCHS = 5
+    WARMUP_EPOCHS = 10
 
     # Custom transform composition that properly handles targets
     class TransformCompose:
@@ -418,27 +418,28 @@ if __name__ == "__main__":
 
     param_groups = [
         {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},
-        {'params': new_params, 'lr': LEARNING_RATE}
+        {'params': new_params, 'lr': LEARNING_RATE},
+        {'params': model.module1.transformer_encoder.parameters(), 'lr': LEARNING_RATE * 2}  # Higher LR for encoder
     ]
 
     # Initialize DETR Criterion and Matcher
     matcher = HungarianMatcher(
-        cost_class=1,      # Reduced from 2 - don't penalize false positives as much
-        cost_bbox=5,       # Keep high - bbox accuracy is important
-        cost_giou=2,       # Keep moderate
-        cost_recognition=1, # Reduced - don't let recognition dominate early training
+        cost_class=2,        # Increase - classification is important!
+        cost_bbox=5,
+        cost_giou=2,
+        cost_recognition=0.5,  # Decrease - too dominant
         vocab_size=VOCAB_SIZE,
         max_seq_len=MAX_RECOGNITION_SEQ_LEN,
         padding_idx=PADDING_IDX
     )
 
     weight_dict = {
-        'loss_ce': 2.0,          # Classification loss
-        'loss_bbox': 5.0,        # Bbox L1 loss
-        'loss_giou': 2.0,        # GIoU loss
-        'loss_recognition': 1.0, # Reduced - don't let it dominate early
-        'loss_cardinality': 1.0, # Cardinality
-        'loss_polygon': 0.5      # Reduced - polygon is less important initially
+        'loss_ce': 2.0,
+        'loss_bbox': 5.0,
+        'loss_giou': 2.0,
+        'loss_recognition': 0.5,  # Reduce recognition weight
+        'loss_cardinality': 1.0,
+        'loss_polygon': 0.5
     }
 
     losses_to_compute = ['labels', 'boxes', 'cardinality', 'polygons']
@@ -486,7 +487,7 @@ if __name__ == "__main__":
 
     # Gradient accumulation and clipping
     ACCUMULATION_STEPS = 4
-    MAX_GRAD_NORM = 0.5
+    MAX_GRAD_NORM = 1.0
 
     from torch.cuda.amp import autocast, GradScaler
     scaler = GradScaler()

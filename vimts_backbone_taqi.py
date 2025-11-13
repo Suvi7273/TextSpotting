@@ -47,50 +47,47 @@ class ReceptiveEnhancementModule(nn.Module):
         return self.relu(self.bn(self.conv(x)))
 
 class PositionalEncoding2D(nn.Module):
-    """
-    2D Positional Encoding for spatial features.
-    Uses sine and cosine functions of different frequencies.
-    """
-    def __init__(self, d_model, max_h=100, max_w=100):
+    def __init__(self, d_model, temperature=10000):
         super().__init__()
-        
-        # Create 2D positional encoding
-        pe = torch.zeros(d_model, max_h, max_w)
-        
-        d_model_half = d_model // 2
-        div_term = torch.exp(torch.arange(0., d_model_half, 2) * 
-                            -(math.log(10000.0) / d_model_half))
-        
-        # Height encoding
-        pos_h = torch.arange(0., max_h).unsqueeze(1)  # (max_h, 1)
-        sin_h = torch.sin(pos_h * div_term)  # (max_h, d_model_half//2)
-        cos_h = torch.cos(pos_h * div_term)  # (max_h, d_model_half//2)
-        
-        # Assign height encodings
-        for i in range(sin_h.shape[1]):
-            pe[2*i, :, :] = sin_h[:, i].unsqueeze(1).repeat(1, max_w)
-            pe[2*i + 1, :, :] = cos_h[:, i].unsqueeze(1).repeat(1, max_w)
-        
-        # Width encoding
-        pos_w = torch.arange(0., max_w).unsqueeze(1)  # (max_w, 1)
-        sin_w = torch.sin(pos_w * div_term)  # (max_w, d_model_half//2)
-        cos_w = torch.cos(pos_w * div_term)  # (max_w, d_model_half//2)
-        
-        # Assign width encodings
-        for i in range(sin_w.shape[1]):
-            pe[d_model_half + 2*i, :, :] = sin_w[:, i].unsqueeze(0).repeat(max_h, 1)
-            pe[d_model_half + 2*i + 1, :, :] = cos_w[:, i].unsqueeze(0).repeat(max_h, 1)
-        
-        pe = pe.permute(1, 2, 0)  # (max_h, max_w, d_model)
-        self.register_buffer('pe', pe)
+        self.d_model = d_model
+        self.temperature = temperature
     
     def forward(self, x, h, w):
         """
         x: (B, H*W, C)
         Returns: (B, H*W, C) with positional encoding added
         """
-        pos_encoding = self.pe[:h, :w, :].reshape(-1, x.shape[-1])  # (H*W, C)
-        return x + pos_encoding.unsqueeze(0)
+        B, HW, C = x.shape
+        assert HW == h * w
+        
+        # Create position indices
+        y_pos = torch.arange(h, dtype=torch.float32, device=x.device)
+        x_pos = torch.arange(w, dtype=torch.float32, device=x.device)
+        
+        # Create meshgrid
+        y_pos, x_pos = torch.meshgrid(y_pos, x_pos, indexing='ij')
+        
+        # Flatten
+        y_pos = y_pos.flatten()  # (H*W,)
+        x_pos = x_pos.flatten()  # (H*W,)
+        
+        # Generate encodings
+        dim_t = torch.arange(C // 2, dtype=torch.float32, device=x.device)
+        dim_t = self.temperature ** (2 * (dim_t // 2) / (C // 2))
+        
+        # Y encodings
+        pos_y = y_pos[:, None] / dim_t
+        pos_y = torch.stack([pos_y[:, 0::2].sin(), pos_y[:, 1::2].cos()], dim=2).flatten(1)
+        
+        # X encodings
+        pos_x = x_pos[:, None] / dim_t
+        pos_x = torch.stack([pos_x[:, 0::2].sin(), pos_x[:, 1::2].cos()], dim=2).flatten(1)
+        
+        # Concatenate
+        pos = torch.cat([pos_y, pos_x], dim=1)  # (H*W, C)
+        
+        # Add to features
+        return x + pos.unsqueeze(0)
     
 
 class TransformerEncoder(nn.Module):
@@ -128,7 +125,7 @@ class TaskAwareQueryInitialization(nn.Module):
         
         # Learnable query embeddings - initialized with proper variance
         self.query_embed = nn.Embedding(num_queries, feature_dim)
-        nn.init.normal_(self.query_embed.weight, mean=0, std=0.01)
+        nn.init.normal_(self.query_embed.weight, mean=0, std=1.0)
         
         # Cross-attention to make queries image-aware
         self.cross_attention = nn.MultiheadAttention(
