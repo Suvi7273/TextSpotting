@@ -288,7 +288,7 @@ if __name__ == "__main__":
     # Training parameters
     BATCH_SIZE = 1
     LEARNING_RATE = 1e-4
-    NUM_EPOCHS = 100
+    NUM_EPOCHS = 50
     WARMUP_EPOCHS = 5
 
     # Custom transform composition that properly handles targets
