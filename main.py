@@ -274,22 +274,56 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Model parameters
+    # SIMPLIFIED TRAINING CONFIGURATION
     FEATURE_DIM = 1024
     NUM_QUERIES = 100
-    NUM_ENCODER_LAYERS = 3
-    NUM_DECODER_LAYERS = 6
+    NUM_ENCODER_LAYERS = 3  # Reduced from 3
+    NUM_DECODER_LAYERS = 3  # Reduced from 6
     NUM_HEADS = 8
-    NUM_FOREGROUND_CLASSES = 1 # 'text' class
+    MAX_RECOGNITION_SEQ_LEN = 25
+    NUM_FOREGROUND_CLASSES = 1
+    NUM_POLYGON_POINTS = 16
 
-    MAX_RECOGNITION_SEQ_LEN = 25 
-    NUM_POLYGON_POINTS = 16 
-
-    # Training parameters
+    # AGGRESSIVE TRAINING PARAMS
     BATCH_SIZE = 1
-    LEARNING_RATE = 1e-4
-    NUM_EPOCHS = 50
-    WARMUP_EPOCHS = 10
+    LEARNING_RATE = 2e-4  # Higher LR
+    NUM_EPOCHS = 100
+    WARMUP_EPOCHS = 5
+
+    # Initialize matcher with SIMPLE costs
+    matcher = HungarianMatcher(
+        cost_class=2,
+        cost_bbox=5,
+        cost_giou=2,
+        cost_recognition=0,  # DISABLE recognition cost initially
+        vocab_size=VOCAB_SIZE,
+        max_seq_len=MAX_RECOGNITION_SEQ_LEN,
+        padding_idx=PADDING_IDX
+    )
+
+    # SIMPLE loss weights - DETECTION ONLY FIRST
+    weight_dict = {
+        'loss_ce': 2.0,
+        'loss_bbox': 5.0,
+        'loss_giou': 2.0,
+        'loss_cardinality': 1.0,
+    }
+
+    # START WITH DETECTION ONLY
+    losses_to_compute = ['labels', 'boxes', 'cardinality']
+
+    print(f"Starting with DETECTION ONLY: {losses_to_compute}")
+
+    criterion = SetCriterion(
+        num_foreground_classes=NUM_FOREGROUND_CLASSES,
+        matcher=matcher,
+        weight_dict=weight_dict,
+        eos_coef=0.1,
+        losses=losses_to_compute,
+        vocab_size=VOCAB_SIZE,
+        max_seq_len=MAX_RECOGNITION_SEQ_LEN,
+        padding_idx=PADDING_IDX
+    ).to(device)
 
     # Custom transform composition that properly handles targets
     class TransformCompose:
@@ -406,24 +440,27 @@ if __name__ == "__main__":
         task_id=TASK_ID
     ).to(device)
 
-    # Use different learning rates for backbone vs new layers
+    # SIMPLE optimizer - one LR for everything except backbone
     backbone_params = []
-    transformer_encoder_params = []
-    other_new_params = []
+    other_params = []
 
     for name, param in model.named_parameters():
         if 'resnet_backbone' in name:
             backbone_params.append(param)
-        elif 'transformer_encoder' in name:
-            transformer_encoder_params.append(param)
         else:
-            other_new_params.append(param)
+            other_params.append(param)
 
-    param_groups = [
+    optimizer = optim.AdamW([
         {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},
-        {'params': transformer_encoder_params, 'lr': LEARNING_RATE * 2},  # Higher LR for encoder
-        {'params': other_new_params, 'lr': LEARNING_RATE}
-    ]
+        {'params': other_params, 'lr': LEARNING_RATE}
+    ], weight_decay=1e-4)
+
+    # Simple cosine scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=1e-6)
+
+    # NO gradient accumulation - simpler
+    ACCUMULATION_STEPS = 1
+    MAX_GRAD_NORM = 1.0
 
     # Initialize DETR Criterion and Matcher
     matcher = HungarianMatcher(
@@ -473,31 +510,6 @@ if __name__ == "__main__":
     print(f"\nCriterion initialized with losses: {losses_to_compute}")
     print(f"Loss weights: {weight_dict}")
 
-    # Print parameter group info
-    print(f"\n Parameter Groups:")
-    print(f"  Backbone params: {len(backbone_params)}")
-    print(f"  Transformer encoder params: {len(transformer_encoder_params)}")
-    print(f"  Other new params: {len(other_new_params)}")
-    print(f"  Total: {len(backbone_params) + len(transformer_encoder_params) + len(other_new_params)}")
-
-    optimizer = optim.AdamW(param_groups, lr=LEARNING_RATE, weight_decay=1e-4)
-
-    def get_stable_lr_scheduler(optimizer, warmup_epochs, total_epochs):
-        def lr_lambda(epoch):
-            if epoch < warmup_epochs:
-                return (epoch + 1) / warmup_epochs
-            else:
-                # Slower decay
-                progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
-                return max(0.1, 0.5 * (1 + math.cos(math.pi * progress)))  # Min LR = 10%
-        
-        return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-    scheduler = get_stable_lr_scheduler(optimizer, WARMUP_EPOCHS, NUM_EPOCHS)
-
-    # Gradient accumulation and clipping
-    ACCUMULATION_STEPS = 4
-    MAX_GRAD_NORM = 1.0
 
     from torch.cuda.amp import autocast, GradScaler
     scaler = GradScaler()
@@ -506,102 +518,52 @@ if __name__ == "__main__":
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     L=[]
-    # --- Training Loop ---
-    print("\nStarting DETR-style training loop...")
+    # SIMPLIFIED TRAINING LOOP
+    print("\n🚀 Starting SIMPLIFIED training...")
     for epoch in range(NUM_EPOCHS):
         model.train()
-        
-        current_losses = get_active_losses(epoch, NUM_EPOCHS)
-        criterion.losses = current_losses
         total_epoch_loss = 0
         
-        optimizer.zero_grad()
-
         for batch_idx, (images, targets) in enumerate(dataloader):
             images = images.to(device)
-            targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in t.items()} for t in targets]
-
-            with autocast():
-                predictions = model(images)
-                loss_dict = criterion(predictions, targets)
-                
-                # Print detailed breakdown every 10 batches
-                # if batch_idx % 10 == 0:
-                #     print_loss_breakdown(loss_dict, weight_dict)
-                
-                # Check for invalid loss values
-                loss_values_valid = all(not (torch.isnan(v).any() or torch.isinf(v).any()) 
-                                       for v in loss_dict.values() if isinstance(v, torch.Tensor))
-                
-                if not loss_values_valid:
-                    print(f"Warning: Invalid loss values detected at epoch {epoch+1}, batch {batch_idx+1}")
-                    for k, v in loss_dict.items():
-                        if isinstance(v, torch.Tensor):
-                            print(f"  {k}: NaN={torch.isnan(v).any()}, Inf={torch.isinf(v).any()}")
-                    continue
-                
-                current_weight_dict = get_active_weight_dict(current_losses)
-                loss = sum(loss_dict[k] * current_weight_dict[k] for k in loss_dict.keys() if k in current_weight_dict)
-                loss = loss / ACCUMULATION_STEPS
+            targets = [{k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                    for k, v in t.items()} for t in targets]
             
-            if torch.isnan(loss) or torch.isinf(loss):
-                print(f"Warning: Invalid total loss at epoch {epoch+1}, batch {batch_idx+1}. Skipping.")
-                continue
+            # Forward pass
+            predictions = model(images)
+            loss_dict = criterion(predictions, targets)
             
-            scaler.scale(loss).backward()
+            # Compute total loss
+            loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() 
+                    if k in weight_dict)
             
-            if (batch_idx + 1) % ACCUMULATION_STEPS == 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-                
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+            optimizer.step()
             
-            total_epoch_loss += loss.item() * ACCUMULATION_STEPS
-
+            total_epoch_loss += loss.item()
+            
+            # Print every 5 batches
             if (batch_idx + 1) % 5 == 0:
-                print(f"Epoch {epoch+1}/{NUM_EPOCHS}, Batch {batch_idx+1}/{len(dataloader)}, Total Loss: {loss.item() * ACCUMULATION_STEPS:.4f}", end=' | ')
+                print(f"Epoch {epoch+1}/{NUM_EPOCHS}, Batch {batch_idx+1}/{len(dataloader)}, "
+                    f"Loss: {loss.item():.4f}", end=' | ')
                 for k, v in loss_dict.items():
-                    if isinstance(v, torch.Tensor):
-                        print(f"{k}: {v.item():.4f}", end=' ')
+                    print(f"{k}: {v.item():.4f}", end=' ')
                 print()
         
-        # Step any remaining gradients
-        if (len(dataloader) % ACCUMULATION_STEPS) != 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-        
         scheduler.step()
-
-        L.append(total_epoch_loss / len(dataloader))
-        print(f"Epoch {epoch+1} finished, Average Total Loss: {total_epoch_loss / len(dataloader):.4f}")
-
-    print("\nDETR-style training finished.")
-    print("Loss trend over epochs:", L)
+        avg_loss = total_epoch_loss / len(dataloader)
+        L.append(avg_loss)
+        print(f"✅ Epoch {epoch+1} finished, Avg Loss: {avg_loss:.4f}\n")
+        
+        
+    torch.save(model.state_dict(), f'/content/model_epoch_{epoch+1}.pth')
+    print(f"Saved checkpoint at epoch {epoch+1}")
+    print("Losses over epochs:", L)
+    print("\n✅ Training finished!")
     
-    # Save model checkpoint
-    checkpoint_path = '/content/vimts_model_checkpoint.pth'
-    torch.save({
-        'epoch': NUM_EPOCHS,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'vocab': {'id_to_char': id_to_char, 'char_to_id': char_to_id, 
-                  'vocab_size': VOCAB_SIZE, 'padding_idx': PADDING_IDX},
-        'config': {
-            'feature_dim': FEATURE_DIM,
-            'num_queries': NUM_QUERIES,
-            'num_encoder_layers': NUM_ENCODER_LAYERS,
-            'num_decoder_layers': NUM_DECODER_LAYERS,
-            'use_adapter': USE_ADAPTER,
-            'use_pqgm': USE_PQGM,
-            'task_id': TASK_ID
-        }
-    }, checkpoint_path)
-    print(f"Model saved to {checkpoint_path}")
 
     # --- Visualize ResNet Feature Maps ---
     print("\nVisualizing ResNet backbone output...")
