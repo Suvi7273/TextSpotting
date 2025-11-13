@@ -611,7 +611,8 @@ if __name__ == "__main__":
 
     for idx, ax in enumerate(axes.flat):
         # Show feature map for channel idx
-        feature_map = resnet_features_np[idx]
+        channel_idx = resnet_features_np.shape[0] - 16 + idx  # Last 16 channels
+        feature_map = resnet_features_np[channel_idx]
         im = ax.imshow(feature_map, cmap='viridis')
         ax.axis('off')
         ax.set_title(f'Ch {idx}', fontsize=8)
