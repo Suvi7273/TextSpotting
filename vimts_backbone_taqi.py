@@ -124,39 +124,88 @@ class TaskAwareQueryInitialization(nn.Module):
     def __init__(self, feature_dim, num_queries):
         super().__init__()
         self.num_queries = num_queries
+        self.feature_dim = feature_dim
         
+        # Learnable query embeddings - initialized with proper variance
         self.query_embed = nn.Embedding(num_queries, feature_dim)
+        nn.init.normal_(self.query_embed.weight, mean=0, std=0.01)
         
-        # 🔧 ADD THIS:
+        # Cross-attention to make queries image-aware
         self.cross_attention = nn.MultiheadAttention(
             feature_dim, num_heads=8, batch_first=True
         )
         
-        self.bbox_coord_head = nn.Linear(feature_dim, 4)
-        self.bbox_score_head = nn.Linear(feature_dim, 1)
-        self.detection_query_project = nn.Linear(feature_dim, feature_dim)
-        self.recognition_query_project = nn.Linear(feature_dim, feature_dim)
+        # Layer normalization
+        self.norm1 = nn.LayerNorm(feature_dim)
+        self.norm2 = nn.LayerNorm(feature_dim)
+        
+        # Separate heads for bbox prediction
+        self.bbox_coord_head = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim),
+            nn.ReLU(),
+            nn.Linear(feature_dim, 4)
+        )
+        
+        self.bbox_score_head = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim // 2),
+            nn.ReLU(),
+            nn.Linear(feature_dim // 2, 1)
+        )
+        
+        # Query projection heads
+        self.detection_query_project = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim),
+            nn.LayerNorm(feature_dim)
+        )
+        
+        self.recognition_query_project = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim),
+            nn.LayerNorm(feature_dim)
+        )
+        
+        # Initialize weights properly
+        self._reset_parameters()
+    
+    def _reset_parameters(self):
+        """Initialize parameters with proper variance"""
+        for module in [self.bbox_coord_head, self.bbox_score_head, 
+                      self.detection_query_project, self.recognition_query_project]:
+            for layer in module.modules():
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.constant_(layer.bias, 0)
 
     def forward(self, encoded_features):
+        """
+        Args:
+            encoded_features: (B, H*W, feature_dim) - image features
+        Returns:
+            encoded_features, detection_queries, recognition_queries, coarse_predictions
+        """
         B = encoded_features.shape[0]
         
-        # Static query embeddings
-        initial_queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
+        # Get static query embeddings
+        initial_queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)  # (B, num_queries, D)
         
-        # 🔧 Cross-attention with image features
-        attended_queries, _ = self.cross_attention(
+        # Make queries image-aware through cross-attention
+        attended_queries, attn_weights = self.cross_attention(
             initial_queries,  # queries
             encoded_features, # keys
             encoded_features  # values
         )
         
-        # Now predict from image-aware queries
-        coarse_bboxes_coords = self.bbox_coord_head(attended_queries).sigmoid()
-        coarse_bboxes_scores = self.bbox_score_head(attended_queries).sigmoid()
+        # Residual connection and normalization
+        queries = self.norm1(initial_queries + attended_queries)
+        
+        # Predict coarse bounding boxes
+        coarse_bboxes_coords = self.bbox_coord_head(queries).sigmoid()  # (B, N, 4)
+        coarse_bboxes_scores = self.bbox_score_head(queries).sigmoid()  # (B, N, 1)
         coarse_bboxes_and_scores = torch.cat([coarse_bboxes_coords, coarse_bboxes_scores], dim=-1)
         
-        detection_queries = self.detection_query_project(attended_queries)
-        recognition_queries = self.recognition_query_project(attended_queries)
+        # Project to detection and recognition queries
+        detection_queries = self.detection_query_project(queries)
+        recognition_queries = self.recognition_query_project(queries)
         
         return encoded_features, detection_queries, recognition_queries, coarse_bboxes_and_scores
 

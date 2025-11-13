@@ -75,12 +75,36 @@ class SetCriterion(nn.Module):
         # DETR's alpha for FocalLoss (usually 0.25) is for foreground class.
         # For background class, the weight is (1-alpha).
         # Here we directly provide alpha as a float. FocalLoss will handle `at`.
-        self.focal_loss_alpha = 0.25
-        self.focal_loss_gamma = 2
+        self.focal_loss_alpha = 0.5
+        self.focal_loss_gamma = 1.5
 
         self.vocab_size = vocab_size
         self.max_seq_len = max_seq_len
         self.padding_idx = padding_idx
+        
+    def forward_with_aux(self, outputs, targets):
+        """Forward with auxiliary losses from intermediate decoder layers"""
+        losses = {}
+        
+        # Main output losses
+        outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
+        indices = self.matcher(outputs_without_aux, targets)
+        
+        for loss in self.losses:
+            losses.update(self.get_loss(loss, outputs_without_aux, targets, indices))
+        
+        # Auxiliary losses (if intermediate outputs are available)
+        if 'aux_outputs' in outputs:
+            for i, aux_outputs in enumerate(outputs['aux_outputs']):
+                indices_aux = self.matcher(aux_outputs, targets)
+                for loss in self.losses:
+                    if loss == 'cardinality':  # Skip cardinality for aux
+                        continue
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices_aux)
+                    l_dict = {k + f'_aux_{i}': v for k, v in l_dict.items()}
+                    losses.update(l_dict)
+        
+        return losses
         
     def _get_src_permutation_idx(self, indices):
         # Permute predictions following indices. For batch_size=1, indices is [(src_idx, tgt_idx)]

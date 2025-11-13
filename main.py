@@ -198,7 +198,64 @@ def visualize_output(original_image_path, model_output, gt_info, vocab_map=None,
     plt.title(f"Image: {gt_info['file_name']}", fontsize=14, weight='bold')
     plt.tight_layout()
     
+def print_loss_breakdown(loss_dict, weight_dict):
+    """Print detailed loss breakdown"""
+    print("\n📊 LOSS BREAKDOWN:")
+    total_weighted = 0
+    for key in loss_dict.keys():
+        if key in weight_dict:
+            weighted = loss_dict[key].item() * weight_dict[key]
+            total_weighted += weighted
+            print(f"   {key:20s}: {loss_dict[key].item():.4f} × {weight_dict[key]:.1f} = {weighted:.4f}")
+        else:
+            print(f"   {key:20s}: {loss_dict[key].item():.4f} (not weighted)")
+    print(f"   {'TOTAL':20s}: {total_weighted:.4f}")
 
+# Define all possible loss weights
+ALL_WEIGHT_DICT = {
+    'loss_ce': 2.0,
+    'loss_bbox': 5.0,
+    'loss_giou': 2.0,
+    'loss_recognition': 3.0,
+    'loss_cardinality': 1.0,
+    'loss_polygon': 1.0
+}
+
+def get_active_weight_dict(active_losses):
+    """Get weight dictionary for currently active losses"""
+    # Map loss names to their weight keys
+    loss_to_weight_key = {
+        'labels': 'loss_ce',
+        'boxes': ['loss_bbox', 'loss_giou'],  # boxes loss produces both
+        'cardinality': 'loss_cardinality',
+        'polygons': 'loss_polygon',
+        'recognition': 'loss_recognition'
+    }
+    
+    active_weights = {}
+    for loss_name in active_losses:
+        weight_keys = loss_to_weight_key[loss_name]
+        if isinstance(weight_keys, list):
+            for key in weight_keys:
+                active_weights[key] = ALL_WEIGHT_DICT[key]
+        else:
+            active_weights[weight_keys] = ALL_WEIGHT_DICT[weight_keys]
+    
+    return active_weights
+
+# Start with simpler losses, add complex ones later
+def get_active_losses(epoch, total_epochs):
+    """Gradually enable losses"""
+    if epoch < 5:
+        # First 5 epochs: focus on detection only
+        return ['labels', 'boxes', 'cardinality']
+    elif epoch < 20:
+        # Next 15 epochs: add polygon
+        return ['labels', 'boxes', 'cardinality', 'polygons']
+    else:
+        # After epoch 20: add recognition
+        return ['labels', 'boxes', 'cardinality', 'polygons', 'recognition']
+    
 import math
 if __name__ == "__main__":
     GT_DIR = '/content/drive/MyDrive/dataset_ts/mlt_sample/Train_GT'
@@ -366,22 +423,22 @@ if __name__ == "__main__":
 
     # Initialize DETR Criterion and Matcher
     matcher = HungarianMatcher(
-        cost_class=2,
-        cost_bbox=5,
-        cost_giou=2,
-        cost_recognition=2,
+        cost_class=1,      # Reduced from 2 - don't penalize false positives as much
+        cost_bbox=5,       # Keep high - bbox accuracy is important
+        cost_giou=2,       # Keep moderate
+        cost_recognition=1, # Reduced - don't let recognition dominate early training
         vocab_size=VOCAB_SIZE,
         max_seq_len=MAX_RECOGNITION_SEQ_LEN,
         padding_idx=PADDING_IDX
     )
 
     weight_dict = {
-        'loss_ce': 2.0,
-        'loss_bbox': 5.0,
-        'loss_giou': 2.0,
-        'loss_recognition': 3.0,
-        'loss_cardinality': 1.0,
-        'loss_polygon': 1.0
+        'loss_ce': 2.0,          # Classification loss
+        'loss_bbox': 5.0,        # Bbox L1 loss
+        'loss_giou': 2.0,        # GIoU loss
+        'loss_recognition': 1.0, # Reduced - don't let it dominate early
+        'loss_cardinality': 1.0, # Cardinality
+        'loss_polygon': 0.5      # Reduced - polygon is less important initially
     }
 
     losses_to_compute = ['labels', 'boxes', 'cardinality', 'polygons']
@@ -441,7 +498,9 @@ if __name__ == "__main__":
     print("\nStarting DETR-style training loop...")
     for epoch in range(NUM_EPOCHS):
         model.train()
-        criterion.train()
+        
+        current_losses = get_active_losses(epoch, NUM_EPOCHS)
+        criterion.losses = current_losses
         total_epoch_loss = 0
         
         optimizer.zero_grad()
@@ -454,6 +513,10 @@ if __name__ == "__main__":
                 predictions = model(images)
                 loss_dict = criterion(predictions, targets)
                 
+                # Print detailed breakdown every 10 batches
+                if batch_idx % 10 == 0:
+                    print_loss_breakdown(loss_dict, weight_dict)
+                
                 # Check for invalid loss values
                 loss_values_valid = all(not (torch.isnan(v).any() or torch.isinf(v).any()) 
                                        for v in loss_dict.values() if isinstance(v, torch.Tensor))
@@ -465,7 +528,8 @@ if __name__ == "__main__":
                             print(f"  {k}: NaN={torch.isnan(v).any()}, Inf={torch.isinf(v).any()}")
                     continue
                 
-                loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+                current_weight_dict = get_active_weight_dict(current_losses)
+                loss = sum(loss_dict[k] * current_weight_dict[k] for k in loss_dict.keys() if k in current_weight_dict)
                 loss = loss / ACCUMULATION_STEPS
             
             if torch.isnan(loss) or torch.isinf(loss):
