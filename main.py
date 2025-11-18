@@ -37,13 +37,9 @@ class VimTSFullModel(nn.Module):
         super().__init__()
         self.module1 = VimTSModule1(
             resnet_pretrained=resnet_pretrained,
-            rem_in_channels=rem_in_channels, rem_out_channels=rem_out_channels,
-            transformer_feature_dim=transformer_feature_dim,
             transformer_num_heads=transformer_num_heads,
             transformer_num_layers=transformer_num_encoder_layers,
-            num_queries=num_queries,
-            use_pqgm=use_pqgm,
-            task_id=task_id
+            num_queries=num_queries
         )
 
         decoder_layer = TaskAwareDecoderLayer(
