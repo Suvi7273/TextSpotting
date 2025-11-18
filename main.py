@@ -275,7 +275,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     # SIMPLIFIED TRAINING CONFIGURATION
-    FEATURE_DIM = 1024
+    FEATURE_DIM = 256
     NUM_QUERIES = 100
     NUM_ENCODER_LAYERS = 3  # Reduced from 3
     NUM_DECODER_LAYERS = 3  # Reduced from 6
@@ -424,7 +424,7 @@ if __name__ == "__main__":
     # --- Initialize Full Model ---
     model = VimTSFullModel(
         resnet_pretrained=True,
-        rem_in_channels=1024,
+        rem_in_channels=256,
         rem_out_channels=FEATURE_DIM,
         transformer_feature_dim=FEATURE_DIM,
         transformer_num_heads=NUM_HEADS,

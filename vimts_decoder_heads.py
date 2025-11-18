@@ -25,7 +25,7 @@ class TaskAwareDecoderLayer(nn.Module):
     Performs self-attention on queries and cross-attention with image features.
     This structure is typical for DETR-like decoders.
     """
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu"):
+    def __init__(self, d_model=256, nhead=8, dim_feedforward=2048, dropout=0.1, activation="relu"):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
         self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
